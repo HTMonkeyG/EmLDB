@@ -1,0 +1,10 @@
+# Build
+*.a
+*.o
+dist/
+
+# Pack
+*.tgz
+
+# Test
+test/

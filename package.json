@@ -1,0 +1,34 @@
+{
+  "name": "emldb",
+  "version": "1.0.0",
+  "description": "An Emscripten compilation of MCBE compatible LevelDB.",
+  "main": "main.js",
+  "files": [
+    "main.d.ts",
+    "dist/libleveldb.js"
+  ],
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "make clean && make",
+    "clean": "make clean"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HTMonkeyG/EmLDB.git"
+  },
+  "keywords": [
+    "minecraft",
+    "mcbe",
+    "leveldb",
+    "leveldb-mcpe",
+    "zlib",
+    "db",
+    "storage"
+  ],
+  "author": "HTMonkeyG",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/HTMonkeyG/EmLDB/issues"
+  },
+  "homepage": "https://github.com/HTMonkeyG/EmLDB#readme"
+}
