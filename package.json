@@ -22,7 +22,7 @@
     "leveldb",
     "leveldb-mcpe",
     "zlib",
-    "db",
+    "emscripten",
     "storage"
   ],
   "author": "HTMonkeyG",

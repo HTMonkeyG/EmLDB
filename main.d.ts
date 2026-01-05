@@ -138,20 +138,94 @@ declare class LevelDBOptions {
   //const FilterPolicy* filter_policy;
 }
 
+declare class LevelDBReadOptions {
+  /**
+   * If true, all data read from underlying storage will be
+   * verified against corresponding checksums.
+   * Default: false
+   */
+  verifyChecksums: boolean;
+
+  /**
+   * Should the data read for this iteration be cached in memory?
+   * Callers may wish to set this field to false for bulk scans.
+   * Default: true
+   */
+  fillCache: boolean;
+
+  // If "snapshot" is non-NULL, read as of the supplied snapshot
+  // (which must belong to the DB that is being read and which must
+  // not have been released).  If "snapshot" is NULL, use an implicit
+  // snapshot of the state at the beginning of this read operation.
+  // Default: NULL
+  //const Snapshot* snapshot;
+}
+
+declare class LevelDBWriteOptions {
+  /**
+   * If true, the write will be flushed from the operating system
+   * buffer cache (by calling WritableFile::Sync()) before the write
+   * is considered complete.  If this flag is true, writes will be
+   * slower.
+   *
+   * If this flag is false, and the machine crashes, some recent
+   * writes may be lost.  Note that if it is just the process that
+   * crashes (i.e., the machine does not reboot), no writes will be
+   * lost even if sync==false.
+   *
+   * In other words, a DB write with sync==false has similar
+   * crash semantics as the "write()" system call.  A DB write
+   * with sync==true has similar crash semantics to a "write()"
+   * system call followed by "fsync()".
+   *
+   * Default: false
+  */
+  sync: boolean;
+}
+
 declare export class LevelDB {
+  static COMPRESSIONS: {
+    NONE: 0,
+    ZLIB: 2,
+    ZLIB_RAW: 4
+  };
+
   /**
    * Initialize WebAssembly runtime. LevelDB functions must be called only
    * before this function.
    */
-  static async initialize(): true;
+  static async initialize(): Promise<true>;
+
+  /**
+   * Destroy the contents of the specified database.
+   * 
+   * Be very careful using this method.
+   * 
+   * @param path 
+   * @param options 
+   */
+  static destroy(path: string, options?: LevelDBOptions): void;
+
+  /**
+   * If a DB cannot be opened, you may attempt to call this method to
+   * resurrect as much of the contents of the database as possible.
+   * 
+   * Some data may be lost, so be careful when calling this function
+   * on a database that contains important information.
+   * 
+   * @param path 
+   * @param options 
+   */
+  static repair(path: string, options?: LevelDBOptions): void;
 
   /**
    * Creates a LevelDB.
+   * 
    * @param path - The path to the database. Use `process.cwd()` as default
-   * parent directory.
+   *   parent directory.
    * @param options - Options.
    */
-  constructor(path: string, options: LevelDBOptions);
+  constructor(path: string, options?: LevelDBOptions);
 
   /**
    * Open the database. Throws an Error on error.
@@ -168,11 +242,25 @@ declare export class LevelDB {
    * and throws an Error on error.
    * 
    * NOTE: consider setting options.sync = true.
+   * 
    * @param key 
    * @param value 
    * @param options 
    */
   put(key: Uint8Array | string, value: Uint8Array | string, options?: LevelDBWriteOptions): boolean;
+
+  /**
+   * Remove the database entry (if any) for "key".  Returns true on
+   * success, and throws an Error on error.
+   * 
+   * It is not an error if "key" did not exist in the database.
+   * 
+   * NOTE: consider setting options.sync = true.
+   * 
+   * @param key 
+   * @param options 
+   */
+  delete(key: Uint8Array | string, options?: LevelDBWriteOptions): boolean;
 
   /**
    * If the database contains an entry for "key", return the value.

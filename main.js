@@ -131,23 +131,45 @@ function cwraps(leveldb) {
     leveldb_writeoptions_create: wrap("leveldb_writeoptions_create", "number", "v"),
     leveldb_writeoptions_destroy: wrap("leveldb_writeoptions_destroy", "void", "Pv"),
     leveldb_writeoptions_set_sync: wrap("leveldb_writeoptions_set_sync", "void", "Pvb"),
+
+    // Utility.
+    leveldb_free: wrap("leveldb_free", "void", "Pv"),
+    leveldb_major_version: wrap("leveldb_free", "number", "v"),
+    leveldb_minor_version: wrap("leveldb_free", "number", "v"),
   }
 }
 
+// Check the error string and convert to JS string.
 function validateError(pszErr) {
-  var szErr;
-  if (pszErr && (szErr = EmLDB.readMemory(pszErr, "i32")))
-    return EmLDB.readString(szErr);
+  var szErr, result = void 0;
+  if (pszErr && (szErr = EmLDB.readMemory(pszErr, "i32"))) {
+    result = EmLDB.readString(szErr);
+    // Free the string.
+    EmLDB.free(szErr);
+  }
   return void 0;
 }
 
-class LevelDBOptions {
-  static COMPRESSIONS = {
-    NONE: 0,
-    ZLIB: 2,
-    ZLIB_RAW: 4
-  };
+function callLDBManagement(fn, path, options) {
+  var opt = new LevelDBOptions(options)
+    , pszErr = EmLDB.malloc(4)
+    , result, err;
 
+  result = fn(opt.serialize(), path, pszErr);
+
+  opt.free();
+
+  if (err = validateError(pszErr)) {
+    // We need to free the memory before throw an error.
+    EmLDB.free(pszErr);
+    throw new Error(err);
+  }
+
+  EmLDB.free(pszErr);
+  return result;
+}
+
+class LevelDBOptions {
   constructor(options = {}) {
     this.createIfMissing = options.createIfMissing ?? void 0;
     this.errorIfExists = options.errorIfExists ?? void 0;
@@ -166,12 +188,12 @@ class LevelDBOptions {
 
     this.createIfMissing != null && EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
     this.errorIfExists != null && EmLDB.leveldb_options_set_error_if_exists(opt, this.errorIfExists);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
-    //this.createIfMissing ?? EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
+    this.paranoidChecks != null && EmLDB.leveldb_options_set_paranoid_checks(opt, this.paranoidChecks);
+    this.writeBufferSize != null && EmLDB.leveldb_options_set_write_buffer_size(opt, this.writeBufferSize);
+    this.maxOpenFiles != null && EmLDB.leveldb_options_set_max_open_files(opt, this.maxOpenFiles);
+    this.blockSize != null && EmLDB.leveldb_options_set_block_size(opt, this.blockSize);
+    this.blockRestartInteval != null && EmLDB.leveldb_options_set_block_restart_interval(opt, this.blockRestartInteval);
+    this.compression != null && EmLDB.leveldb_options_set_compression(opt, this.compression);
 
     return this.opt;
   }
@@ -229,10 +251,24 @@ class LevelDBWriteOptions {
 }
 
 class LevelDB {
+  static COMPRESSIONS = {
+    NONE: 0,
+    ZLIB: 2,
+    ZLIB_RAW: 4
+  };
+
   static async initialize() {
     var leveldb = await EmLDBModule();
     EmLDB = cwraps(leveldb);
     return true;
+  }
+
+  static destroy(path, options) {
+    callLDBManagement(EmLDB.leveldb_destroy_db, path, options);
+  }
+
+  static repair(path, options) {
+    callLDBManagement(EmLDB.leveldb_repair_db, path, options);
   }
 
   constructor(path, options) {
@@ -250,21 +286,7 @@ class LevelDB {
   }
 
   open() {
-    var opt = new LevelDBOptions(this.options)
-      , pszErr = EmLDB.malloc(4)
-      , err;
-
-    this.db = EmLDB.leveldb_open(opt.serialize(), this.path, pszErr);
-
-    opt.free();
-
-    if (err = validateError(pszErr)) {
-      // We need to free the memory before throw an error.
-      EmLDB.free(pszErr);
-      throw new Error(err);
-    }
-
-    EmLDB.free(pszErr);
+    this.db = callLDBManagement(EmLDB.leveldb_open, this.path, this.options);
     return !!this.db;
   }
 
@@ -285,6 +307,7 @@ class LevelDB {
       , pszErr = EmLDB.malloc(4)
       , err;
 
+    // Convert string to binary data.
     if (typeof key === "string")
       key = (new TextEncoder("")).encode(key);
     if (typeof value === "string")
@@ -304,6 +327,39 @@ class LevelDB {
     return true;
   }
 
+  delete(key, options) {
+    this.validate();
+
+    var wopt = new LevelDBWriteOptions(options)
+      , pszErr = EmLDB.malloc(4)
+      , err;
+
+    // Convert string to binary data.
+    if (typeof key === "string")
+      key = (new TextEncoder("")).encode(key);
+
+    EmLDB.leveldb_delete(this.db, wopt.serialize(), key, key.length, pszErr)
+
+    wopt.free();
+
+    if (err = validateError(pszErr)) {
+      // We need to Efree the memory before throw an error.
+      EmLDB.free(pszErr);
+      throw new Error(err);
+    }
+
+    EmLDB.free(pszErr);
+    return true;
+  }
+
+  write(operations) {
+
+  }
+
+  batch(operations) {
+    return this.write(operations);
+  }
+
   get(key, options) {
     this.validate();
 
@@ -312,6 +368,7 @@ class LevelDB {
       , pszErr = EmLDB.malloc(4)
       , pValue, length, result, err;
 
+    // Convert string to binary data.
     if (typeof key === "string")
       key = (new TextEncoder("")).encode(key);
 
@@ -335,10 +392,38 @@ class LevelDB {
     length = EmLDB.readMemory(pLength);
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
+    EmLDB.leveldb_free(pValue);
     EmLDB.free(pLength);
     EmLDB.free(pszErr);
     return result;
   }
+
+  compact(startKey, limitKey) {
+
+  }
+
+  iterator() {
+
+  }
+
+  [Symbol.iterator]() {
+    return new LevelDBIterator(this.iterator());
+  }
+}
+
+class LevelDBIteratorBase {
+  constructor(db) {
+    this.db = db;
+    this.iter = this.iter;
+  }
+
+  next() {
+
+  }
+}
+
+class LevelDBIterator {
+
 }
 
 exports.LevelDB = LevelDB;
