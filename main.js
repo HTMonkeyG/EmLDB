@@ -134,8 +134,8 @@ function cwraps(leveldb) {
 
     // Utility.
     leveldb_free: wrap("leveldb_free", "void", "Pv"),
-    leveldb_major_version: wrap("leveldb_free", "number", "v"),
-    leveldb_minor_version: wrap("leveldb_free", "number", "v"),
+    leveldb_major_version: wrap("leveldb_major_version", "number", "v"),
+    leveldb_minor_version: wrap("leveldb_major_version", "number", "v"),
   }
 }
 
@@ -150,6 +150,17 @@ function validateError(pszErr) {
   return void 0;
 }
 
+function validateInit() {
+  if (!EmLDB)
+    throw new Error("LevelDB function called before initialization.");
+}
+
+function validatePointer(p) {
+  if (!p)
+    throw new Error("invalid pointer or creation failed.");
+}
+
+// Call DB management methods and checks the error.
 function callLDBManagement(fn, path, options) {
   var opt = new LevelDBOptions(options)
     , pszErr = EmLDB.malloc(4)
@@ -185,6 +196,7 @@ class LevelDBOptions {
 
   serialize() {
     var opt = this.opt = EmLDB.leveldb_options_create();
+    validatePointer(opt);
 
     this.createIfMissing != null && EmLDB.leveldb_options_set_create_if_missing(opt, this.createIfMissing);
     this.errorIfExists != null && EmLDB.leveldb_options_set_error_if_exists(opt, this.errorIfExists);
@@ -215,6 +227,7 @@ class LevelDBReadOptions {
 
   serialize() {
     var opt = this.opt = EmLDB.leveldb_readoptions_create();
+    validatePointer(opt);
 
     this.verifyChecksums != null && EmLDB.leveldb_readoptions_set_sync(opt, this.verifyChecksums);
     this.fillCache != null && EmLDB.leveldb_readoptions_set_fill_cache(opt, this.fillCache);
@@ -238,6 +251,7 @@ class LevelDBWriteOptions {
 
   serialize() {
     var opt = this.opt = EmLDB.leveldb_writeoptions_create();
+    validatePointer(opt);
 
     this.sync ?? EmLDB.leveldb_writeoptions_set_sync(opt, this.sync);
 
@@ -264,16 +278,26 @@ class LevelDB {
   }
 
   static destroy(path, options) {
+    validateInit();
     callLDBManagement(EmLDB.leveldb_destroy_db, path, options);
   }
 
   static repair(path, options) {
+    validateInit();
     callLDBManagement(EmLDB.leveldb_repair_db, path, options);
   }
 
+  static version() {
+    validateInit();
+
+    return {
+      major: EmLDB.leveldb_major_version(),
+      minor: EmLDB.leveldb_minor_version(),
+    }
+  }
+
   constructor(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB constructor called before initialization.");
+    validateInit();
 
     this.path = path;
     this.options = options ?? {};
@@ -343,7 +367,7 @@ class LevelDB {
     wopt.free();
 
     if (err = validateError(pszErr)) {
-      // We need to Efree the memory before throw an error.
+      // We need to free the memory before throw an error.
       EmLDB.free(pszErr);
       throw new Error(err);
     }
@@ -399,31 +423,167 @@ class LevelDB {
   }
 
   compact(startKey, limitKey) {
-
+    // Convert string to binary data.
+    if (typeof startKey === "string")
+      startKey = (new TextEncoder("")).encode(startKey);
+    if (typeof limitKey === "string")
+      limitKey = (new TextEncoder("")).encode(limitKey);
   }
 
-  iterator() {
-
+  iterator(options) {
+    return new LevelDBIteratorBase(this.db, options);
   }
 
   [Symbol.iterator]() {
     return new LevelDBIterator(this.iterator());
   }
+
+  entries() {
+    return this[Symbol.iterator]();
+  }
 }
 
 class LevelDBIteratorBase {
-  constructor(db) {
+  constructor(db, options) {
+    var options = new LevelDBReadOptions(options);
+
     this.db = db;
-    this.iter = this.iter;
+    this.iter = EmLDB.leveldb_create_iterator(this.db, options.serialize());
+    validatePointer(this.iter);
+
+    options.free();
+  }
+
+  validate() {
+    if (!this.db || !this.iter)
+      throw new Error("try to access freed iterator.");
+  }
+
+  valid() {
+    if (!this.db || !this.iter)
+      return false;
+    return !!EmLDB.leveldb_iter_valid(this.iter);
+  }
+
+  free() {
+    this.validate();
+    EmLDB.leveldb_iter_destroy(this.iter);
+    this.iter = this.db = 0;
+  }
+
+  seekToFirst() {
+    this.validate();
+    EmLDB.leveldb_iter_seek_to_first(this.iter);
+  }
+
+  seekToLast() {
+    this.validate();
+    EmLDB.leveldb_iter_seek_to_last(this.iter);
+  }
+
+  seek(key) {
+    this.validate();
+
+    // Convert string to binary data.
+    if (typeof key === "string")
+      key = (new TextEncoder("")).encode(key);
+
+    EmLDB.leveldb_iter_seek(this.iter, key, key.length);
   }
 
   next() {
+    this.validate();
+    EmLDB.leveldb_iter_next(this.iter);
+  }
 
+  prev() {
+    this.validate();
+    EmLDB.leveldb_iter_prev(this.iter);
+  }
+
+  key() {
+    var pLength = EmLDB.malloc(4)
+      , pValue, length, result;
+
+    pValue = EmLDB.leveldb_iter_key(this.iter, pLength);
+
+    if (!pValue) {
+      EmLDB.free(pLength);
+      return void 0;
+    }
+
+    length = EmLDB.readMemory(pLength);
+    result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
+
+    EmLDB.leveldb_free(pValue);
+    EmLDB.free(pLength);
+    return result;
+  }
+
+  value() {
+    var pLength = EmLDB.malloc(4)
+      , pValue, length, result;
+
+    pValue = EmLDB.leveldb_iter_value(this.iter, pLength);
+
+    if (!pValue) {
+      EmLDB.free(pLength);
+      return void 0;
+    }
+
+    length = EmLDB.readMemory(pLength);
+    result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
+
+    EmLDB.leveldb_free(pValue);
+    EmLDB.free(pLength);
+    return result;
+  }
+
+  getError() {
+    var pszErr = EmLDB.malloc(4)
+      , pValue, err;
+
+    pValue = EmLDB.leveldb_iter_get_error(this.iter, pszErr);
+
+    if (err = validateError(pszErr)) {
+      // We need to free the memory before throw an error.
+      EmLDB.free(pszErr);
+      throw new Error(err);
+    }
+
+    EmLDB.free(pszErr);
   }
 }
 
 class LevelDBIterator {
+  constructor(base) {
+    this.base = base;
+    this.base.seekToFirst();
+  }
 
+  next() {
+    if (!this.base.valid()) {
+      return {
+        done: true
+      };
+    }
+
+    var key = this.base.key()
+      , value = this.base.value()
+      , valid;
+
+    this.base.next();
+    valid = this.base.valid();
+
+    if (!valid)
+      // Free the iterator base if we reached the end.
+      this.base.free();
+
+    return {
+      value: [key, value],
+      done: false
+    }
+  }
 }
 
 exports.LevelDB = LevelDB;

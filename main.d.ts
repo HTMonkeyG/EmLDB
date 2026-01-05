@@ -183,6 +183,106 @@ declare class LevelDBWriteOptions {
   sync: boolean;
 }
 
+declare class LevelDBIteratorBase {
+  constructor(db: number, options: LevelDBReadOptions);
+
+  /**
+   * An iterator is either positioned at a key/value pair, or not valid.
+   * 
+   * This method returns true if the iterator is valid.
+   */
+  valid(): boolean;
+
+  /**
+   * Free the iterator.
+   */
+  free(): void;
+
+  /**
+   * Position at the first key in the source.
+   * 
+   * The iterator is valid() after this call if the source is not empty.
+   */
+  seekToFirst(): void;
+
+  /**
+   * Position at the last key in the source.
+   * 
+   * The iterator is valid() after this call if the source is not empty.
+   */
+  seekToLast(): void;
+
+  /**
+   * Position at the first key in the source that is at or past target.
+   * 
+   * The iterator is valid() after this call if the source contains
+   * an entry that comes at or past target.
+   * 
+   * @param key 
+   */
+  seek(key: Uint8Array | string): void;
+
+  /**
+   * Moves to the next entry in the source.
+   * 
+   * After this call, valid() is true if the iterator was not positioned at
+   * the first entry in source.
+   * 
+   * REQUIRES: valid()
+   */
+  next(): void;
+
+  /**
+   * Moves to the previous entry in the source.
+   * 
+   * After this call, valid() is true if the iterator was not positioned at
+   * the first entry in source.
+   * 
+   * REQUIRES: valid()
+   */
+  prev(): void;
+
+  /**
+   * Return the key for the current entry.
+   * 
+   * The underlying storage for the returned slice is valid only until the next
+   * modification of the iterator.
+   * 
+   * REQUIRES: valid()
+   */
+  key(): Uint8Array;
+
+  /**
+   * Return the value for the current entry.
+   * 
+   * The underlying storage for the returned slice is valid only until the next
+   * modification of the iterator.
+   * 
+   * REQUIRES: valid()
+   */
+  value(): Uint8Array;
+
+  /**
+   * If an error has occurred, throw it. Else do nothing.
+   */
+  getError(): void;
+}
+
+/**
+ * JS iterator object.
+ */
+declare class LevelDBIterator {
+  constructor(base: LevelDBIteratorBase);
+
+  next(): {
+    value: {
+      key: Uint8Array,
+      value: Uint8Array
+    } | undefined,
+    done: boolean
+  };
+}
+
 declare export class LevelDB {
   static COMPRESSIONS: {
     NONE: 0,
@@ -270,4 +370,22 @@ declare export class LevelDB {
    * May throws an Error on error.
    */
   get(key: Uint8Array | string, options: LevelDBReadOptions): Uint8Array | undefined;
+
+  /**
+   * Return a LevelDBIteratorBase over the contents of the database.
+   * 
+   * The result of iterator() is initially invalid (caller must call one of the
+   * seek methods on the iterator before using it).
+   *
+   * Caller should free the iterator when it is no longer needed.
+   * The returned iterator should be deleted before this db is deleted.
+   * 
+   * @param options 
+   */
+  iterator(options: LevelDBReadOptions): LevelDBIteratorBase;
+
+  /**
+   * JS iterable protocol iterator.
+   */
+  [Symbol.iterator](): LevelDBIterator;
 }
