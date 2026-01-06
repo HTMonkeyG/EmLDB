@@ -146,6 +146,7 @@ function validateError(pszErr) {
     result = EmLDB.readString(szErr);
     // Free the string.
     EmLDB.free(szErr);
+    return result;
   }
   return void 0;
 }
@@ -166,6 +167,7 @@ function callLDBManagement(fn, path, options) {
     , pszErr = EmLDB.malloc(4)
     , result, err;
 
+  //EmLDB.writeMemory(pszErr, 0, "i32");
   result = fn(opt.serialize(), path, pszErr);
 
   opt.free();
@@ -337,7 +339,8 @@ class LevelDB {
     if (typeof value === "string")
       value = (new TextEncoder("")).encode(value);
 
-    EmLDB.leveldb_put(this.db, wopt.serialize(), key, key.length, value, value.length, pszErr)
+    EmLDB.writeMemory(pszErr, 0, "i32");
+    EmLDB.leveldb_put(this.db, wopt.serialize(), key, key.length, value, value.length, pszErr);
 
     wopt.free();
 
@@ -362,7 +365,8 @@ class LevelDB {
     if (typeof key === "string")
       key = (new TextEncoder("")).encode(key);
 
-    EmLDB.leveldb_delete(this.db, wopt.serialize(), key, key.length, pszErr)
+    EmLDB.writeMemory(pszErr, 0, "i32");
+    EmLDB.leveldb_delete(this.db, wopt.serialize(), key, key.length, pszErr);
 
     wopt.free();
 
@@ -396,6 +400,7 @@ class LevelDB {
     if (typeof key === "string")
       key = (new TextEncoder("")).encode(key);
 
+    EmLDB.writeMemory(pszErr, 0, "i32");
     pValue = EmLDB.leveldb_get(this.db, ropt.serialize(), key, key.length, pLength, pszErr);
 
     ropt.free();
@@ -423,6 +428,8 @@ class LevelDB {
   }
 
   compact(startKey, limitKey) {
+    this.validate();
+
     // Convert string to binary data.
     if (typeof startKey === "string")
       startKey = (new TextEncoder("")).encode(startKey);
@@ -431,6 +438,8 @@ class LevelDB {
   }
 
   iterator(options) {
+    this.validate();
+
     return new LevelDBIteratorBase(this.db, options);
   }
 
@@ -502,6 +511,8 @@ class LevelDBIteratorBase {
   }
 
   key() {
+    this.validate();
+
     var pLength = EmLDB.malloc(4)
       , pValue, length, result;
 
@@ -515,12 +526,15 @@ class LevelDBIteratorBase {
     length = EmLDB.readMemory(pLength);
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
-    EmLDB.leveldb_free(pValue);
+    // We don't need and must not free pValue here.
+    //EmLDB.leveldb_free(pValue);
     EmLDB.free(pLength);
     return result;
   }
 
   value() {
+    this.validate();
+
     var pLength = EmLDB.malloc(4)
       , pValue, length, result;
 
@@ -534,7 +548,7 @@ class LevelDBIteratorBase {
     length = EmLDB.readMemory(pLength);
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
-    EmLDB.leveldb_free(pValue);
+    //EmLDB.leveldb_free(pValue);
     EmLDB.free(pLength);
     return result;
   }

@@ -8,12 +8,14 @@ CC = emcc
 
 SRC_DIRS = $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
 
-CFLAGS = -std=c++11 -O3 -g -pthread -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include 
-CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
+CFLAGS = -std=c++11 -O3 -gsource-map -pthread -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include 
+CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare 
 CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_POSIX
 
 LFLAGS = -lm -lnoderawfs.js -lnodefs.js -flto
 LFLAGS += -s USE_ZLIB=1\
+	-s INITIAL_MEMORY=128MB\
+	-s TOTAL_STACK=32MB\
 	-s SINGLE_FILE=1\
 	-s WASM=1\
 	-s MODULARIZE=1\

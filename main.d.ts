@@ -388,4 +388,9 @@ declare export class LevelDB {
    * JS iterable protocol iterator.
    */
   [Symbol.iterator](): LevelDBIterator;
+
+  /**
+   * The same as [Symbol.iterator]().
+   */
+  entries(): LevelDBIterator
 }
