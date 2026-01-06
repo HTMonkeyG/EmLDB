@@ -167,7 +167,7 @@ function callLDBManagement(fn, path, options) {
     , pszErr = EmLDB.malloc(4)
     , result, err;
 
-  //EmLDB.writeMemory(pszErr, 0, "i32");
+  EmLDB.writeMemory(pszErr, 0, "i32");
   result = fn(opt.serialize(), path, pszErr);
 
   opt.free();
@@ -231,7 +231,7 @@ class LevelDBReadOptions {
     var opt = this.opt = EmLDB.leveldb_readoptions_create();
     validatePointer(opt);
 
-    this.verifyChecksums != null && EmLDB.leveldb_readoptions_set_sync(opt, this.verifyChecksums);
+    this.verifyChecksums != null && EmLDB.leveldb_readoptions_set_verify_checksums(opt, this.verifyChecksums);
     this.fillCache != null && EmLDB.leveldb_readoptions_set_fill_cache(opt, this.fillCache);
     this.snapshot != null && EmLDB.leveldb_readoptions_set_snapshot(opt, this.snapshot);
 
