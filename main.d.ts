@@ -124,6 +124,11 @@ declare class LevelDBOptions {
   // efficiently detect that and will switch to uncompressed mode.
   //Compressor* compressors[256];
 
+  /**
+   * The compressor id which LevelDB uses.
+   */
+  compression: number;
+
   // EXPERIMENTAL: If true, append to existing MANIFEST and log files
   // when a database is opened.  This can significantly speed up open.
   //
@@ -275,10 +280,25 @@ declare class LevelDBIterator {
   constructor(base: LevelDBIteratorBase);
 
   next(): {
-    value: {
-      key: Uint8Array,
-      value: Uint8Array
-    } | undefined,
+    value: [Uint8Array, Uint8Array] | undefined,
+    done: boolean
+  };
+}
+
+declare class LevelDBKeyIterator extends LevelDBIterator {
+  constructor(base: LevelDBIteratorBase);
+
+  next(): {
+    value: Uint8Array | undefined,
+    done: boolean
+  };
+}
+
+declare class LevelDBValueIterator extends LevelDBIterator {
+  constructor(base: LevelDBIteratorBase);
+
+  next(): {
+    value: Uint8Array | undefined,
     done: boolean
   };
 }
@@ -392,5 +412,15 @@ declare export class LevelDB {
   /**
    * The same as [Symbol.iterator]().
    */
-  entries(): LevelDBIterator
+  entries(): LevelDBIterator;
+
+  /**
+   * Returns an iterable of keys in the db.
+   */
+  keys(): LevelDBKeyIterator;
+
+  /**
+   * Returns an iterable of keys in the db.
+   */
+  values(): LevelDBValueIterator;
 }

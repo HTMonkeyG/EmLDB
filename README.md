@@ -11,7 +11,7 @@ An Emscripten build of LevelDB with zlib compressor.
 
 ## Getting Started
 ```js
-const { LevelDB } = require("../main.js");
+const { LevelDB } = require("emldb");
 
 LevelDB.initialize().then(function () {
   var db = new LevelDB("./db", { createIfMissing: true, compression: LevelDB.COMPRESSIONS.ZLIB });
