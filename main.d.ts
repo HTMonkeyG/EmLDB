@@ -420,7 +420,7 @@ declare export class LevelDB {
   keys(): LevelDBKeyIterator;
 
   /**
-   * Returns an iterable of keys in the db.
+   * Returns an iterable of values in the db.
    */
   values(): LevelDBValueIterator;
 }

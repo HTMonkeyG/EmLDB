@@ -356,7 +356,8 @@ class LevelDBIteratorBase {
   }
 
   free() {
-    this.validate();
+    if (!this.db || !this.iter)
+      return;
 
     EmLDB.leveldb_iter_destroy(this.iter);
     LevelDBIteratorBase.GC.unregister(this);
@@ -552,6 +553,7 @@ class LevelDB {
     this.path = path;
     this.options = options ?? {};
     this.db = 0;
+    this.derivatives = [];
   }
 
   validate() {
@@ -565,11 +567,21 @@ class LevelDB {
   }
 
   close() {
-    if (this.db)
-      EmLDB.leveldb_close(this.db);
-    else
+    if (!this.db)
       throw new Error("try to close DB before it's open.");
 
+    // Free all allocated objects before close the db.
+    for (var d of this.derivatives) {
+      var obj = d.deref();
+      if (!obj)
+        continue;
+
+      obj.free();
+    }
+
+    EmLDB.leveldb_close(this.db);
+
+    this.derivatives = [];
     this.db = 0;
     return true;
   }
@@ -687,8 +699,12 @@ class LevelDB {
 
   iterator(options) {
     this.validate();
+    var result = new LevelDBIteratorBase(this.db, options);
 
-    return new LevelDBIteratorBase(this.db, options);
+    // Add a WeakRef to record all derived objects. We need to free them before
+    // close the db.
+    this.derivatives.push(new WeakRef(result));
+    return result;
   }
 
   [Symbol.iterator]() {
