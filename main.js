@@ -408,7 +408,7 @@ class LevelDBIteratorBase {
       return void 0;
     }
 
-    length = EmLDB.readMemory(pLength);
+    length = EmLDB.readMemory(pLength, "i32");
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
     // We don't need and must not free pValue here.
@@ -430,7 +430,7 @@ class LevelDBIteratorBase {
       return void 0;
     }
 
-    length = EmLDB.readMemory(pLength);
+    length = EmLDB.readMemory(pLength, "i32");
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
     //EmLDB.leveldb_free(pValue);
@@ -678,7 +678,7 @@ class LevelDB {
       return void 0;
     }
 
-    length = EmLDB.readMemory(pLength);
+    length = EmLDB.readMemory(pLength, "i32");
     result = Uint8Array.from(EmLDB.module.HEAPU8.subarray(pValue, pValue + length));
 
     EmLDB.leveldb_free(pValue);
