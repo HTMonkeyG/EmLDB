@@ -1,6 +1,6 @@
 {
   "name": "emldb",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "An Emscripten compilation of MCBE compatible LevelDB.",
   "main": "main.js",
   "files": [
