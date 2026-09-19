@@ -6,7 +6,7 @@ SRC_DIR = ./deps/leveldb-mcpe
 CXX = em++
 CC = emcc
 
-SRC_DIRS = $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
+SRC_DIRS = ./src $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
 
 CFLAGS = -std=c++11 -O3 -pthread -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include 
 CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare 
