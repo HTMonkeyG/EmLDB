@@ -8,3 +8,8 @@ dist/
 
 # Test
 test/
+test*
+
+# IDE
+.vscode/
+ref/
