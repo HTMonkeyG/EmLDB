@@ -367,6 +367,9 @@ class LevelDB {
     this.db = null;
     this.opt = null;
     this.derivatives = [];
+
+    this.defaultWriteOpt = new LevelDBWriteOptions();
+    this.defaultReadOpt = new LevelDBReadOptions();
   }
 
   validate() {
@@ -435,7 +438,7 @@ class LevelDB {
   put(key, value, options) {
     this.validate();
 
-    var wopt = new LevelDBWriteOptions(options);
+    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
     key = toUint8Array(key);
     value = toUint8Array(value);
 
@@ -443,34 +446,34 @@ class LevelDB {
       this.db.put(key, value, wopt.get());
       return true;
     } finally {
-      wopt.free();
+      if (wopt != this.defaultWriteOpt) wopt.free();
     }
   }
 
   delete(key, options) {
     this.validate();
 
-    var wopt = new LevelDBWriteOptions(options);
+    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
     key = toUint8Array(key);
 
     try {
       this.db.del(key, wopt.get());
       return true;
     } finally {
-      wopt.free();
+      if (wopt != this.defaultWriteOpt) wopt.free();
     }
   }
 
   write(batch, options) {
     this.validate();
 
-    var wopt = new LevelDBWriteOptions(options);
+    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
     try {
       this.db.write(batch.get(), wopt.get());
       return true;
     } finally {
-      wopt.free();
+      if (wopt != this.defaultWriteOpt) wopt.free();
     }
   }
 
@@ -492,13 +495,13 @@ class LevelDB {
   get(key, options) {
     this.validate();
 
-    var ropt = new LevelDBReadOptions(options);
+    var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
     key = toUint8Array(key);
 
     try {
       return this.db.get(key, ropt.get());
     } finally {
-      ropt.free();
+      if (ropt != this.defaultWriteOpt) ropt.free();
     }
   }
 
@@ -521,13 +524,13 @@ class LevelDB {
   iterator(options) {
     this.validate();
 
-    var ropt = new LevelDBReadOptions(options);
+    var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
     var iter;
 
     try {
       iter = this.db.createIterator(ropt.get());
     } finally {
-      ropt.free();
+      if (ropt != this.defaultWriteOpt) ropt.free();
     }
 
     var result = new LevelDBIteratorBase(iter);

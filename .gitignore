@@ -9,6 +9,8 @@ dist/
 # Test
 test/
 test*
+*.cpuprofile
+*.cpuprofile.*
 
 # IDE
 .vscode/
