@@ -365,6 +365,7 @@ class LevelDB {
     this.path = path;
     this.options = options || {};
     this.db = null;
+    this.opt = null;
     this.derivatives = [];
   }
 
@@ -374,15 +375,25 @@ class LevelDB {
   }
 
   open() {
+    if (this.db)
+      throw new Error("try to open DB that is already open.");
+
     var opt = new LevelDBOptions(this.options);
+    var db = new EmLDB.DB();
 
     try {
-      this.db = new EmLDB.DB();
-      this.db.open(this.path, opt.get());
-      return true;
-    } finally {
+      db.open(this.path, opt.get());
+    } catch (e) {
+      db.delete();
       opt.free();
+      throw e;
     }
+
+    // The db keeps raw pointers to what the options own (block cache, filter
+    // policy, comparator), so the options have to outlive it - see close().
+    this.opt = opt;
+    this.db = db;
+    return true;
   }
 
   close() {
@@ -408,8 +419,16 @@ class LevelDB {
     }
 
     this.db.delete();
-    this.derivatives = [];
     this.db = null;
+    this.derivatives = [];
+
+    // Only now may the options (and the cache / filter policy / comparator they
+    // own) be released: the db was referencing them all along.
+    if (this.opt) {
+      this.opt.free();
+      this.opt = null;
+    }
+
     return true;
   }
 

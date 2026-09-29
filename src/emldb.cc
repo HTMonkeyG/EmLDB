@@ -91,6 +91,44 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// Compressors
+// ----------------------------------------------------------------------------
+
+// Compressors must outlive every DB that references them: Options only stores
+// raw pointers, while emldb.js frees its OptionsWrapper right after open().
+// This pool keeps them alive for the lifetime of the module.
+class CompressorPool {
+public:
+  static CompressorPool &Get() {
+    static CompressorPool *instance = new CompressorPool();  // never destroyed
+    return *instance;
+  }
+
+  // The level is only honoured on first use: a compressor already held by an
+  // open DB must not be recreated, otherwise that DB is left with a dangling
+  // pointer.
+  Compressor *zlibRaw(int level) {
+    if (!m_zlibraw) m_zlibraw = std::make_unique<ZlibCompressorRaw>(level);
+    return m_zlibraw.get();
+  }
+
+  Compressor *zlib(int level) {
+    if (!m_zlib) m_zlib = std::make_unique<ZlibCompressor>(level);
+    return m_zlib.get();
+  }
+
+private:
+  CompressorPool() {}
+
+  std::unique_ptr<Compressor> m_zlibraw;
+  std::unique_ptr<Compressor> m_zlib;
+
+  // No copying allowed
+  CompressorPool(const CompressorPool &);
+  void operator=(const CompressorPool &);
+};
+
+// ----------------------------------------------------------------------------
 // Options Wrappers
 // ----------------------------------------------------------------------------
 
@@ -98,10 +136,8 @@ class OptionsWrapper {
 public:
   OptionsWrapper() {
     m_options.create_if_missing = true;
-    // Initialize compressor array to NULL
-    for (int i = 0; i < 256; ++i) {
-      m_options.compressors[i] = NULL;
-    }
+    // Default to raw-zlib (ID 4), the compression MCBE itself writes
+    installCompressors(CompressorPool::Get().zlibRaw(-1));
   }
 
   ~OptionsWrapper() {}
@@ -135,15 +171,11 @@ public:
   }
 
   void setZlibCompression(int level) {
-    m_zlibCompressor = std::make_unique<ZlibCompressor>(level);
-    m_options.compressors[(unsigned char)m_zlibCompressor->uniqueCompressionID] =
-      m_zlibCompressor.get();
+    installCompressors(CompressorPool::Get().zlib(level));
   }
 
   void setZlibRawCompression(int level) {
-    m_zlibRawCompressor = std::make_unique<ZlibCompressorRaw>(level);
-    m_options.compressors[(unsigned char)m_zlibRawCompressor->uniqueCompressionID] =
-      m_zlibRawCompressor.get();
+    installCompressors(CompressorPool::Get().zlibRaw(level));
   }
 
   void setComparator(val js_compare, const std::string &name) {
@@ -166,12 +198,35 @@ public:
   Options &get() { return m_options; }
 
 private:
+  // Compressors have to be packed from slot 0 with no gaps in between:
+  //   * table_builder.cc always writes blocks with compressors[0], so that slot
+  //     selects the compression used for new blocks;
+  //   * table/format.cc scans the slots in order and stops at the first empty
+  //     one (`if (!c || c->uniqueCompressionID == compressionID)`), so a hole
+  //     silently disables every compressor placed after it.
+  void installCompressors(Compressor *writer) {
+    CompressorPool &pool = CompressorPool::Get();
+    Compressor *wanted[] = {writer, pool.zlibRaw(-1), pool.zlib(-1)};
+    const int wantedCount = sizeof(wanted) / sizeof(wanted[0]);
+
+    for (int i = 0; i < 256; ++i) {
+      m_options.compressors[i] = NULL;
+    }
+
+    int used = 0;
+    for (int i = 0; i < wantedCount; ++i) {
+      bool duplicate = false;
+      for (int j = 0; j < used; ++j) {
+        if (m_options.compressors[j] == wanted[i]) duplicate = true;
+      }
+      if (!duplicate) m_options.compressors[used++] = wanted[i];
+    }
+  }
+
   Options m_options;
   std::unique_ptr<JSComparator> m_comparator;
   std::unique_ptr<Cache> m_cache;
   std::unique_ptr<const FilterPolicy> m_filterPolicy;
-  std::unique_ptr<ZlibCompressor> m_zlibCompressor;
-  std::unique_ptr<ZlibCompressorRaw> m_zlibRawCompressor;
 
   // No copying allowed
   OptionsWrapper(const OptionsWrapper &);
