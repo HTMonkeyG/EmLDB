@@ -1,5 +1,5 @@
-// Copyright (c) 2024 EmLDB Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style license.
+// Copyright (c) 2026 HTMonkeyG. All rights reserved.
+// Use of this source code is governed by MIT license.
 //
 // Emscripten bindings for LevelDB using Embind.
 // Provides high-performance JavaScript interface to LevelDB C++ API.
@@ -18,76 +18,40 @@
 #include <memory>
 #include <vector>
 
+#include "emldb_utils.h"
+
 using namespace emscripten;
 
-// C++11 compatible make_unique implementation
-namespace std {
-  template<typename T, typename... Args>
-  unique_ptr<T> make_unique(Args &&...args) {
-    return unique_ptr<T>(new T(std::forward<Args>(args)...));
-  }
-}  // namespace std
-
 namespace leveldb {
-
-// ----------------------------------------------------------------------------
-// Utility Functions
-// ----------------------------------------------------------------------------
-
-// Convert JavaScript Uint8Array to std::string for binary data transfer
-static std::string jsArrayToString(const val &js_array) {
-  unsigned int length = js_array["length"].as<unsigned int>();
-  std::string result;
-  result.reserve(length);
-
-  for (unsigned int i = 0; i < length; ++i) {
-    result.push_back(static_cast<char>(js_array[i].as<unsigned char>()));
-  }
-  return result;
-}
-
-// Convert std::string to JavaScript Uint8Array
-static val stringToJsArray(const std::string &str) {
-  val uint8_array = val::global("Uint8Array").new_(str.size());
-  for (size_t i = 0; i < str.size(); ++i) {
-    uint8_array.set(i, static_cast<unsigned char>(str[i]));
-  }
-  return uint8_array;
-}
 
 // ----------------------------------------------------------------------------
 // JavaScript Comparator Wrapper
 // ----------------------------------------------------------------------------
 
-// Bridges JavaScript comparison function to LevelDB Comparator interface
+// Bridges JavaScript comparison function to LevelDB Comparator interface.
 class JSComparator: public Comparator {
 public:
-  JSComparator(val js_compare, const std::string &name)
-      : m_jsCompare(js_compare), m_name(name) {}
+  JSComparator(val jsFunc, const std::string &name): m_jsCompare(jsFunc), m_name(name) { }
+  JSComparator(const JSComparator &) = delete;
+  JSComparator &operator=(const JSComparator &) = delete;
 
-  virtual ~JSComparator() {}
+  virtual ~JSComparator() noexcept override = default;
 
-  virtual int Compare(const Slice &a, const Slice &b) const {
+  virtual int Compare(const Slice &a, const Slice &b) const override {
     val a_array = stringToJsArray(std::string(a.data(), a.size()));
     val b_array = stringToJsArray(std::string(b.data(), b.size()));
     return m_jsCompare(a_array, b_array).as<int>();
   }
 
-  virtual const char *Name() const {
-    return m_name.c_str();
-  }
+  virtual cstring Name() const override { return m_name.c_str(); }
 
-  // These are optional optimization methods
-  virtual void FindShortestSeparator(std::string *, const Slice &) const {}
-  virtual void FindShortSuccessor(std::string *) const {}
+  // These are optional optimization methods.
+  virtual void FindShortestSeparator(std::string *, const Slice &) const override { }
+  virtual void FindShortSuccessor(std::string *) const override { }
 
 private:
-  val m_jsCompare;
-  std::string m_name;
-
-  // No copying allowed
-  JSComparator(const JSComparator &);
-  void operator=(const JSComparator &);
+  val m_jsCompare = {};
+  std::string m_name = "";
 };
 
 // ----------------------------------------------------------------------------
@@ -108,20 +72,20 @@ public:
   // open DB must not be recreated, otherwise that DB is left with a dangling
   // pointer.
   Compressor *zlibRaw(int level) {
-    if (!m_zlibraw) m_zlibraw = std::make_unique<ZlibCompressorRaw>(level);
+    if (!m_zlibraw) m_zlibraw = emldb::make_unique<ZlibCompressorRaw>(level);
     return m_zlibraw.get();
   }
 
   Compressor *zlib(int level) {
-    if (!m_zlib) m_zlib = std::make_unique<ZlibCompressor>(level);
+    if (!m_zlib) m_zlib = emldb::make_unique<ZlibCompressor>(level);
     return m_zlib.get();
   }
 
 private:
-  CompressorPool() {}
+  CompressorPool() { }
 
-  std::unique_ptr<Compressor> m_zlibraw;
-  std::unique_ptr<Compressor> m_zlib;
+  std::unique_ptr<Compressor> m_zlibraw = {};
+  std::unique_ptr<Compressor> m_zlib = {};
 
   // No copying allowed
   CompressorPool(const CompressorPool &);
@@ -134,68 +98,29 @@ private:
 
 class OptionsWrapper {
 public:
+  ~OptionsWrapper() = default;
   OptionsWrapper() {
     m_options.create_if_missing = true;
-    // Default to raw-zlib (ID 4), the compression MCBE itself writes
-    installCompressors(CompressorPool::Get().zlibRaw(-1));
+    // Default to raw-zlib (ID 4), the compression MCBE itself writes.
+    m_installCompressors(CompressorPool::Get().zlibRaw(-1));
   }
-
-  ~OptionsWrapper() {}
-
-  void setCreateIfMissing(bool value) {
-    m_options.create_if_missing = value;
-  }
-
-  void setErrorIfExists(bool value) {
-    m_options.error_if_exists = value;
-  }
-
-  void setParanoidChecks(bool value) {
-    m_options.paranoid_checks = value;
-  }
-
-  void setWriteBufferSize(size_t size) {
-    m_options.write_buffer_size = size;
-  }
-
-  void setMaxOpenFiles(int num) {
-    m_options.max_open_files = num;
-  }
-
-  void setBlockSize(size_t size) {
-    m_options.block_size = size;
-  }
-
-  void setBlockRestartInterval(int interval) {
-    m_options.block_restart_interval = interval;
-  }
-
-  void setZlibCompression(int level) {
-    installCompressors(CompressorPool::Get().zlib(level));
-  }
-
-  void setZlibRawCompression(int level) {
-    installCompressors(CompressorPool::Get().zlibRaw(level));
-  }
-
-  void setComparator(val js_compare, const std::string &name) {
-    m_comparator = std::make_unique<JSComparator>(js_compare, name);
-    m_options.comparator = m_comparator.get();
-  }
-
-  void setCache(size_t capacity) {
-    m_cache = std::unique_ptr<Cache>(NewLRUCache(capacity));
-    m_options.block_cache = m_cache.get();
-  }
-
-  void setBloomFilter(int bits_per_key) {
-    m_filterPolicy = std::unique_ptr<const FilterPolicy>(
-        NewBloomFilterPolicy(bits_per_key)
-    );
-    m_options.filter_policy = m_filterPolicy.get();
-  }
+  OptionsWrapper(const OptionsWrapper &) = delete;
+  OptionsWrapper &operator=(const OptionsWrapper &) = delete;
 
   Options &get() { return m_options; }
+
+  void setCreateIfMissing(bool value) { m_options.create_if_missing = value; }
+  void setErrorIfExists(bool value) { m_options.error_if_exists = value; }
+  void setParanoidChecks(bool value) { m_options.paranoid_checks = value; }
+  void setWriteBufferSize(size_t size) { m_options.write_buffer_size = size; }
+  void setMaxOpenFiles(int num) { m_options.max_open_files = num; }
+  void setBlockSize(size_t size) { m_options.block_size = size; }
+  void setBlockRestartInterval(int interval) { m_options.block_restart_interval = interval; }
+  void setZlibCompression(int level) { m_installCompressors(CompressorPool::Get().zlib(level)); }
+  void setZlibRawCompression(int level) { m_installCompressors(CompressorPool::Get().zlibRaw(level)); }
+  void setComparator(val jsFunc, const std::string &name) { m_comparator = emldb::make_unique<JSComparator>(jsFunc, name); m_options.comparator = m_comparator.get(); }
+  void setCache(size_t capacity) { m_cache.reset(NewLRUCache(capacity)); m_options.block_cache = m_cache.get(); }
+  void setBloomFilter(int bitsPerKey) { m_filterPolicy.reset(NewBloomFilterPolicy(bitsPerKey)); m_options.filter_policy = m_filterPolicy.get(); }
 
 private:
   // Compressors have to be packed from slot 0 with no gaps in between:
@@ -204,13 +129,13 @@ private:
   //   * table/format.cc scans the slots in order and stops at the first empty
   //     one (`if (!c || c->uniqueCompressionID == compressionID)`), so a hole
   //     silently disables every compressor placed after it.
-  void installCompressors(Compressor *writer) {
+  void m_installCompressors(Compressor *writer) {
     CompressorPool &pool = CompressorPool::Get();
     Compressor *wanted[] = {writer, pool.zlibRaw(-1), pool.zlib(-1)};
     const int wantedCount = sizeof(wanted) / sizeof(wanted[0]);
 
     for (int i = 0; i < 256; ++i) {
-      m_options.compressors[i] = NULL;
+      m_options.compressors[i] = nullptr;
     }
 
     int used = 0;
@@ -223,56 +148,41 @@ private:
     }
   }
 
-  Options m_options;
-  std::unique_ptr<JSComparator> m_comparator;
-  std::unique_ptr<Cache> m_cache;
-  std::unique_ptr<const FilterPolicy> m_filterPolicy;
-
-  // No copying allowed
-  OptionsWrapper(const OptionsWrapper &);
-  void operator=(const OptionsWrapper &);
+  Options m_options = {};
+  std::unique_ptr<JSComparator> m_comparator = {};
+  std::unique_ptr<Cache> m_cache = {};
+  std::unique_ptr<const FilterPolicy> m_filterPolicy = {};
 };
 
 class ReadOptionsWrapper {
 public:
-  ReadOptionsWrapper() {}
-  ~ReadOptionsWrapper() {}
-
-  void setVerifyChecksums(bool value) {
-    m_options.verify_checksums = value;
-  }
-
-  void setFillCache(bool value) {
-    m_options.fill_cache = value;
-  }
+  ~ReadOptionsWrapper() = default;
+  ReadOptionsWrapper() = default;
+  ReadOptionsWrapper(const ReadOptionsWrapper &) = delete;
+  ReadOptionsWrapper &operator=(const ReadOptionsWrapper &) = delete;
 
   ReadOptions &get() { return m_options; }
 
-private:
-  ReadOptions m_options;
+  void setVerifyChecksums(bool value) { m_options.verify_checksums = value; }
+  void setFillCache(bool value) { m_options.fill_cache = value; }
 
-  // No copying allowed
-  ReadOptionsWrapper(const ReadOptionsWrapper &);
-  void operator=(const ReadOptionsWrapper &);
+private:
+  ReadOptions m_options = {};
 };
 
 class WriteOptionsWrapper {
 public:
-  WriteOptionsWrapper() {}
-  ~WriteOptionsWrapper() {}
-
-  void setSync(bool value) {
-    m_options.sync = value;
-  }
+  ~WriteOptionsWrapper() = default;
+  WriteOptionsWrapper() = default;
+  WriteOptionsWrapper(const WriteOptionsWrapper &) = delete;
+  WriteOptionsWrapper &operator=(const WriteOptionsWrapper &) = delete;
 
   WriteOptions &get() { return m_options; }
 
-private:
-  WriteOptions m_options;
+  void setSync(bool value) { m_options.sync = value; }
 
-  // No copying allowed
-  WriteOptionsWrapper(const WriteOptionsWrapper &);
-  void operator=(const WriteOptionsWrapper &);
+private:
+  WriteOptions m_options = {};
 };
 
 // ----------------------------------------------------------------------------
@@ -281,34 +191,20 @@ private:
 
 class IteratorWrapper {
 public:
-  explicit IteratorWrapper(Iterator *iter): m_iter(iter) {}
+  ~IteratorWrapper() = default;
+  explicit IteratorWrapper(Iterator *iter) { m_iter.reset(iter); }
+  IteratorWrapper(const IteratorWrapper &) = delete;
+  IteratorWrapper &operator=(const IteratorWrapper &) = delete;
 
-  ~IteratorWrapper() {}
+  std::string getError() const { Status status = m_iter->status(); return status.ok() ? "" : status.ToString(); }
 
-  bool valid() const {
-    return m_iter->Valid();
-  }
+  bool valid() const { return m_iter->Valid(); }
+  void seekToFirst() { m_iter->SeekToFirst(); }
+  void seekToLast() { m_iter->SeekToLast(); }
 
-  void seekToFirst() {
-    m_iter->SeekToFirst();
-  }
-
-  void seekToLast() {
-    m_iter->SeekToLast();
-  }
-
-  void seek(const val &key) {
-    std::string key_str = jsArrayToString(key);
-    m_iter->Seek(key_str);
-  }
-
-  void next() {
-    m_iter->Next();
-  }
-
-  void prev() {
-    m_iter->Prev();
-  }
+  void seek(const val &key) { m_iter->Seek(jsArrayToString(key)); }
+  void next() { m_iter->Next(); }
+  void prev() { m_iter->Prev(); }
 
   val key() const {
     if (!m_iter->Valid()) {
@@ -326,69 +222,62 @@ public:
     return stringToJsArray(std::string(v.data(), v.size()));
   }
 
-  std::string getError() const {
-    Status status = m_iter->status();
-    if (!status.ok()) {
-      return status.ToString();
-    }
-    return "";
-  }
-
 private:
-  std::unique_ptr<Iterator> m_iter;
-
-  // No copying allowed
-  IteratorWrapper(const IteratorWrapper &);
-  void operator=(const IteratorWrapper &);
+  std::unique_ptr<Iterator> m_iter = {};
 };
 
 // ----------------------------------------------------------------------------
-// WriteBatch Wrapper
+// WriteBatchWrapper
 // ----------------------------------------------------------------------------
 
 class WriteBatchWrapper {
 public:
-  WriteBatchWrapper() {}
-  ~WriteBatchWrapper() {}
-
-  void put(const val &key, const val &value) {
-    std::string key_str = jsArrayToString(key);
-    std::string value_str = jsArrayToString(value);
-    m_batch.Put(key_str, value_str);
-  }
-
-  void del(const val &key) {
-    std::string key_str = jsArrayToString(key);
-    m_batch.Delete(key_str);
-  }
-
-  void clear() {
-    m_batch.Clear();
-  }
+  ~WriteBatchWrapper() = default;
+  WriteBatchWrapper() = default;
+  WriteBatchWrapper(const WriteBatchWrapper &) = delete;
+  WriteBatchWrapper &operator=(const WriteBatchWrapper &) = delete;
 
   WriteBatch &get() { return m_batch; }
 
-private:
-  WriteBatch m_batch;
+  void put(const val &key, const val &value) { m_batch.Put(jsArrayToString(key), jsArrayToString(value)); }
+  void del(const val &key) { m_batch.Delete(jsArrayToString(key)); }
+  void clear() { m_batch.Clear(); }
 
-  // No copying allowed
-  WriteBatchWrapper(const WriteBatchWrapper &);
-  void operator=(const WriteBatchWrapper &);
+private:
+  WriteBatch m_batch = {};
 };
 
 // ----------------------------------------------------------------------------
-// Database Wrapper
+// LevelDBWrapper
 // ----------------------------------------------------------------------------
 
 class LevelDBWrapper {
 public:
-  LevelDBWrapper() {}
+  static void destroy(const std::string &path, OptionsWrapper &options) {
+    Status status = DestroyDB(path, options.get());
+    if (!status.ok()) {
+      throw std::runtime_error(status.ToString());
+    }
+  }
 
-  ~LevelDBWrapper() {}
+  static void repair(const std::string &path, OptionsWrapper &options) {
+    Status status = RepairDB(path, options.get());
+    if (!status.ok()) {
+      throw std::runtime_error(status.ToString());
+    }
+  }
 
-  void open(const std::string &path, OptionsWrapper &options) {
+  ~LevelDBWrapper() = default;
+  LevelDBWrapper() = default;
+  LevelDBWrapper(const LevelDBWrapper &) = delete;
+  LevelDBWrapper &operator=(const LevelDBWrapper &) = delete;
+
+  void open(
+    const std::string &path,
+    OptionsWrapper &options
+  ) {
     m_path = path;
-    DB *db = NULL;
+    DB *db = nullptr;
     Status status = DB::Open(options.get(), path, &db);
 
     if (!status.ok()) {
@@ -398,9 +287,7 @@ public:
     m_db.reset(db);
   }
 
-  void close() {
-    m_db.reset();
-  }
+  void close() { m_db.reset(); }
 
   void put(const val &key, const val &value, WriteOptionsWrapper &options) {
     if (!m_db) {
@@ -477,8 +364,8 @@ public:
 
     std::string start_str, limit_str;
     Slice start_slice, limit_slice;
-    Slice *start = NULL;
-    Slice *limit = NULL;
+    Slice *start = nullptr;
+    Slice *limit = nullptr;
 
     if (!start_key.isUndefined() && !start_key.isNull()) {
       start_str = jsArrayToString(start_key);
@@ -507,27 +394,9 @@ public:
     return "";
   }
 
-  static void destroy(const std::string &path, OptionsWrapper &options) {
-    Status status = DestroyDB(path, options.get());
-    if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
-    }
-  }
-
-  static void repair(const std::string &path, OptionsWrapper &options) {
-    Status status = RepairDB(path, options.get());
-    if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
-    }
-  }
-
 private:
   std::unique_ptr<DB> m_db;
-  std::string m_path;
-
-  // No copying allowed
-  LevelDBWrapper(const LevelDBWrapper &);
-  void operator=(const LevelDBWrapper &);
+  std::string m_path = "";
 };
 
 }  // namespace leveldb
@@ -541,66 +410,60 @@ EMSCRIPTEN_BINDINGS(leveldb) {
 
   // Options classes
   class_<OptionsWrapper>("Options")
-      .constructor<>()
-      .function("setCreateIfMissing", &OptionsWrapper::setCreateIfMissing)
-      .function("setErrorIfExists", &OptionsWrapper::setErrorIfExists)
-      .function("setParanoidChecks", &OptionsWrapper::setParanoidChecks)
-      .function("setWriteBufferSize", &OptionsWrapper::setWriteBufferSize)
-      .function("setMaxOpenFiles", &OptionsWrapper::setMaxOpenFiles)
-      .function("setBlockSize", &OptionsWrapper::setBlockSize)
-      .function("setBlockRestartInterval", &OptionsWrapper::setBlockRestartInterval)
-      .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
-      .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
-      .function("setComparator", &OptionsWrapper::setComparator)
-      .function("setCache", &OptionsWrapper::setCache)
-      .function("setBloomFilter", &OptionsWrapper::setBloomFilter)
-      ;
+    .constructor<>()
+    .function("setCreateIfMissing", &OptionsWrapper::setCreateIfMissing)
+    .function("setErrorIfExists", &OptionsWrapper::setErrorIfExists)
+    .function("setParanoidChecks", &OptionsWrapper::setParanoidChecks)
+    .function("setWriteBufferSize", &OptionsWrapper::setWriteBufferSize)
+    .function("setMaxOpenFiles", &OptionsWrapper::setMaxOpenFiles)
+    .function("setBlockSize", &OptionsWrapper::setBlockSize)
+    .function("setBlockRestartInterval", &OptionsWrapper::setBlockRestartInterval)
+    .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
+    .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
+    .function("setComparator", &OptionsWrapper::setComparator)
+    .function("setCache", &OptionsWrapper::setCache)
+    .function("setBloomFilter", &OptionsWrapper::setBloomFilter);
 
   class_<ReadOptionsWrapper>("ReadOptions")
-      .constructor<>()
-      .function("setVerifyChecksums", &ReadOptionsWrapper::setVerifyChecksums)
-      .function("setFillCache", &ReadOptionsWrapper::setFillCache)
-      ;
+    .constructor<>()
+    .function("setVerifyChecksums", &ReadOptionsWrapper::setVerifyChecksums)
+    .function("setFillCache", &ReadOptionsWrapper::setFillCache);
 
   class_<WriteOptionsWrapper>("WriteOptions")
-      .constructor<>()
-      .function("setSync", &WriteOptionsWrapper::setSync)
-      ;
+    .constructor<>()
+    .function("setSync", &WriteOptionsWrapper::setSync);
 
   // Iterator
   class_<IteratorWrapper>("Iterator")
-      .function("valid", &IteratorWrapper::valid)
-      .function("seekToFirst", &IteratorWrapper::seekToFirst)
-      .function("seekToLast", &IteratorWrapper::seekToLast)
-      .function("seek", &IteratorWrapper::seek)
-      .function("next", &IteratorWrapper::next)
-      .function("prev", &IteratorWrapper::prev)
-      .function("key", &IteratorWrapper::key)
-      .function("value", &IteratorWrapper::value)
-      .function("getError", &IteratorWrapper::getError)
-      ;
+    .function("valid", &IteratorWrapper::valid)
+    .function("seekToFirst", &IteratorWrapper::seekToFirst)
+    .function("seekToLast", &IteratorWrapper::seekToLast)
+    .function("seek", &IteratorWrapper::seek)
+    .function("next", &IteratorWrapper::next)
+    .function("prev", &IteratorWrapper::prev)
+    .function("key", &IteratorWrapper::key)
+    .function("value", &IteratorWrapper::value)
+    .function("getError", &IteratorWrapper::getError);
 
   // WriteBatch
   class_<WriteBatchWrapper>("WriteBatch")
-      .constructor<>()
-      .function("put", &WriteBatchWrapper::put)
-      .function("del", &WriteBatchWrapper::del)
-      .function("clear", &WriteBatchWrapper::clear)
-      ;
+    .constructor<>()
+    .function("put", &WriteBatchWrapper::put)
+    .function("del", &WriteBatchWrapper::del)
+    .function("clear", &WriteBatchWrapper::clear);
 
   // Database
   class_<LevelDBWrapper>("DB")
-      .constructor<>()
-      .function("open", &LevelDBWrapper::open)
-      .function("close", &LevelDBWrapper::close)
-      .function("put", &LevelDBWrapper::put)
-      .function("get", &LevelDBWrapper::get)
-      .function("del", &LevelDBWrapper::del)
-      .function("write", &LevelDBWrapper::write)
-      .function("createIterator", &LevelDBWrapper::createIterator, allow_raw_pointers())
-      .function("compactRange", &LevelDBWrapper::compactRange)
-      .function("getProperty", &LevelDBWrapper::getProperty)
-      .class_function("destroy", &LevelDBWrapper::destroy)
-      .class_function("repair", &LevelDBWrapper::repair)
-      ;
+    .constructor<>()
+    .function("open", &LevelDBWrapper::open)
+    .function("close", &LevelDBWrapper::close)
+    .function("put", &LevelDBWrapper::put)
+    .function("get", &LevelDBWrapper::get)
+    .function("del", &LevelDBWrapper::del)
+    .function("write", &LevelDBWrapper::write)
+    .function("createIterator", &LevelDBWrapper::createIterator, allow_raw_pointers())
+    .function("compactRange", &LevelDBWrapper::compactRange)
+    .function("getProperty", &LevelDBWrapper::getProperty)
+    .class_function("destroy", &LevelDBWrapper::destroy)
+    .class_function("repair", &LevelDBWrapper::repair);
 }

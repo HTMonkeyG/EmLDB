@@ -8,12 +8,13 @@ CC = emcc
 
 SRC_DIRS = ./src $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
 
-CFLAGS = -std=c++11 -O3 -pthread -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include 
-CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare 
+CFLAGS = -std=c++11 -O3 -pthread
+CFLAGS += -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include -I./src
 CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_POSIX
-# CFLAGS += -g
+CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
+CFLAGS += -g
 
-LFLAGS = -lm -lnoderawfs.js -lnodefs.js -flto --bind
+LFLAGS = -lm -flto --bind -msimd128 # -lnoderawfs.js -lnodefs.js
 LFLAGS += -s USE_ZLIB=1\
 	-s INITIAL_MEMORY=128MB\
 	-s TOTAL_STACK=32MB\
@@ -24,11 +25,13 @@ LFLAGS += -s USE_ZLIB=1\
 	-s INVOKE_RUN=0\
 	-s EXPORTED_RUNTIME_METHODS=FS\
 	-s FORCE_FILESYSTEM=1\
-	-s NODERAWFS=1\
+	-s NODERAWFS=0\
+	-s WASMFS=1\
 	-s ALLOW_MEMORY_GROWTH=1\
 	-s PTHREAD_POOL_SIZE=1
 
-CPP_SRC = emldb.cc\
+CPP_SRC = emldb_utils.cc\
+	emldb.cc\
 	db/builder.cc\
 	db/db_impl.cc\
 	db/db_iter.cc\
