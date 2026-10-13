@@ -24,6 +24,11 @@ using namespace emscripten;
 
 namespace leveldb {
 
+// Forward declaration of SetFS function from env_emscripten.cc
+#if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
+void SetFS(emscripten::val fs);
+#endif
+
 // ----------------------------------------------------------------------------
 // JavaScript Comparator Wrapper
 // ----------------------------------------------------------------------------
@@ -407,6 +412,11 @@ private:
 
 EMSCRIPTEN_BINDINGS(leveldb) {
   using namespace leveldb;
+
+#if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
+  // Environment setup
+  function("SetFS", &SetFS);
+#endif
 
   // Options classes
   class_<OptionsWrapper>("Options")

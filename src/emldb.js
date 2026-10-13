@@ -331,6 +331,7 @@ class LevelDB {
   static async initialize() {
     var module = await EmLDBModule();
     EmLDB = module;
+    EmLDB.SetFS(require("fs"));
     return true;
   }
 
@@ -501,7 +502,7 @@ class LevelDB {
     try {
       return this.db.get(key, ropt.get());
     } finally {
-      if (ropt != this.defaultWriteOpt) ropt.free();
+      if (ropt != this.defaultReadOpt) ropt.free();
     }
   }
 
@@ -530,7 +531,7 @@ class LevelDB {
     try {
       iter = this.db.createIterator(ropt.get());
     } finally {
-      if (ropt != this.defaultWriteOpt) ropt.free();
+      if (ropt != this.defaultReadOpt) ropt.free();
     }
 
     var result = new LevelDBIteratorBase(iter);

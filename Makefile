@@ -10,7 +10,7 @@ SRC_DIRS = ./src $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
 
 CFLAGS = -std=c++11 -O3 -pthread
 CFLAGS += -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include -I./src
-CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_POSIX
+CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_EMSCRIPTEN
 CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
 CFLAGS += -g
 
@@ -25,8 +25,8 @@ LFLAGS += -s USE_ZLIB=1\
 	-s INVOKE_RUN=0\
 	-s EXPORTED_RUNTIME_METHODS=FS\
 	-s FORCE_FILESYSTEM=1\
-	-s NODERAWFS=0\
-	-s WASMFS=1\
+	-s NODERAWFS=1\
+	-s WASMFS=0\
 	-s ALLOW_MEMORY_GROWTH=1\
 	-s PTHREAD_POOL_SIZE=1
 
@@ -69,9 +69,8 @@ CPP_SRC = emldb_utils.cc\
 	util/status.cc\
 	db/zlib_compressor.cc\
 	db/zstd_compressor.cc\
-	port/port_posix_sse.cc\
-	port/port_posix.cc\
-	util/env_posix.cc
+	port/port_emscripten.cc\
+	env_emscripten.cc
 CPP_OBJ = $(addprefix $(DIST_DIR)/, $(notdir $(CPP_SRC:.cc=.o)))
 
 TARGET = libleveldb.js
