@@ -6,12 +6,14 @@
 
 #if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
 
+#include <atomic>
 #include <pthread.h>
 #include <string.h>
 #include <string>
 #include <vector>
 #include <deque>
 #include <set>
+#include <emscripten.h>
 #include <emscripten/val.h>
 #include <leveldb/env.h>
 #include <leveldb/slice.h>
@@ -23,8 +25,12 @@ namespace leveldb {
 
 namespace {
 
-// Global fs module reference (set from JavaScript)
-static emscripten::val* g_fs = nullptr;
+// Thread-local fs module reference (set from JavaScript)
+// Each thread needs its own emscripten::val since they cannot be shared across threads
+thread_local emscripten::val* tls_fs = nullptr;
+
+// Global flag to track if fs has been initialized
+static std::atomic<bool> g_fs_initialized(false);
 
 // Helper structure for StartThread
 struct StartThreadState {
@@ -32,20 +38,39 @@ struct StartThreadState {
   void* arg;
 };
 
+EM_JS(emscripten::EM_VAL, requireFS, (), {
+  return Emval.toHandle(require("fs"));
+});
+
+// Helper function to get or initialize the fs module for current thread
+inline emscripten::val GetFS() {
+  if (tls_fs == nullptr) {
+    // Each thread gets fs module from JavaScript require('fs')
+    tls_fs = new emscripten::val(emscripten::val::take_ownership(requireFS()));
+  }
+  return *tls_fs;
+}
+
+// Check if fs is available
+inline bool HasFS() {
+  return g_fs_initialized.load(std::memory_order_acquire);
+}
+
 }  // anonymous namespace
 
 // Sequential file implementation using Node.js fs.open/read/close
 class EmSequentialFile : public SequentialFile {
 public:
-  EmSequentialFile(emscripten::val fs, const std::string& path, i32 fd)
-      : m_fs(fs), m_path(path), m_fd(fd) {}
+  EmSequentialFile(const std::string& path, i32 fd)
+      : m_path(path), m_fd(fd) {}
 
   EmSequentialFile(const EmSequentialFile&) = delete;
   EmSequentialFile& operator=(const EmSequentialFile&) = delete;
 
   virtual ~EmSequentialFile() noexcept {
     if (m_fd != -1) {
-      m_fs["closeSync"](m_fd);
+      emscripten::val fs = GetFS();
+      fs["closeSync"](m_fd);
     }
   }
 
@@ -54,11 +79,13 @@ public:
       return Status::NotFound(m_path);
     }
 
+    emscripten::val fs = GetFS();
+
     // Create a Buffer for reading
     emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
 
     // Read data: fs.readSync(fd, buffer, 0, length, null)
-    emscripten::val bytesReadVal = m_fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
+    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
     i32 bytesRead = bytesReadVal.as<i32>();
 
     if (bytesRead < 0) {
@@ -81,9 +108,11 @@ public:
       return Status::NotFound(m_path);
     }
 
+    emscripten::val fs = GetFS();
+
     // Read and discard data to simulate skip
     emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
-    emscripten::val bytesReadVal = m_fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
+    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
     i32 bytesRead = bytesReadVal.as<i32>();
 
     if (bytesRead < 0) {
@@ -94,7 +123,6 @@ public:
   }
 
 private:
-  emscripten::val m_fs;
   std::string m_path;
   i32 m_fd;
 };
@@ -102,15 +130,16 @@ private:
 // Random access file implementation using fd and pread
 class EmRandomAccessFile : public RandomAccessFile {
 public:
-  EmRandomAccessFile(emscripten::val fs, const std::string& path, i32 fd)
-      : m_fs(fs), m_path(path), m_fd(fd) {}
+  EmRandomAccessFile(const std::string& path, i32 fd)
+      : m_path(path), m_fd(fd) {}
 
   EmRandomAccessFile(const EmRandomAccessFile&) = delete;
   EmRandomAccessFile& operator=(const EmRandomAccessFile&) = delete;
 
   virtual ~EmRandomAccessFile() noexcept {
     if (m_fd != -1) {
-      m_fs["closeSync"](m_fd);
+      emscripten::val fs = GetFS();
+      fs["closeSync"](m_fd);
     }
   }
 
@@ -121,11 +150,13 @@ public:
       return Status::NotFound(m_path);
     }
 
+    emscripten::val fs = GetFS();
+
     // Create a Buffer for reading
     emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
 
     // Read at offset: fs.readSync(fd, buffer, 0, length, position)
-    emscripten::val bytesReadVal = m_fs["readSync"](m_fd, buffer, 0, n, static_cast<double>(offset));
+    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, static_cast<double>(offset));
     i32 bytesRead = bytesReadVal.as<i32>();
 
     if (bytesRead < 0) {
@@ -144,7 +175,6 @@ public:
   }
 
 private:
-  emscripten::val m_fs;
   std::string m_path;
   i32 m_fd;
 };
@@ -152,15 +182,16 @@ private:
 // Writable file implementation using Node.js fs.open/write/close
 class EmWritableFile : public WritableFile {
 public:
-  EmWritableFile(emscripten::val fs, const std::string& path, i32 fd)
-      : m_fs(fs), m_path(path), m_fd(fd) {}
+  EmWritableFile(const std::string& path, i32 fd)
+      : m_path(path), m_fd(fd) {}
 
   EmWritableFile(const EmWritableFile&) = delete;
   EmWritableFile& operator=(const EmWritableFile&) = delete;
 
   virtual ~EmWritableFile() noexcept {
     if (m_fd != -1) {
-      m_fs["closeSync"](m_fd);
+      emscripten::val fs = GetFS();
+      fs["closeSync"](m_fd);
     }
   }
 
@@ -171,6 +202,8 @@ public:
       return Status::IOError(m_path, "file not open");
     }
 
+    emscripten::val fs = GetFS();
+
     // Convert Slice to Buffer
     emscripten::val buffer = emscripten::val::global("Buffer")["from"](
       emscripten::val(emscripten::typed_memory_view(data.size(),
@@ -178,7 +211,7 @@ public:
     );
 
     // Write: fs.writeSync(fd, buffer)
-    emscripten::val bytesWritten = m_fs["writeSync"](m_fd, buffer);
+    emscripten::val bytesWritten = fs["writeSync"](m_fd, buffer);
 
     if (bytesWritten.as<size_t>() != data.size()) {
       return Status::IOError(m_path, "write incomplete");
@@ -189,7 +222,8 @@ public:
 
   virtual Status Close() override {
     if (m_fd != -1) {
-      m_fs["closeSync"](m_fd);
+      emscripten::val fs = GetFS();
+      fs["closeSync"](m_fd);
       m_fd = -1;
     }
     return Status::OK();
@@ -205,14 +239,15 @@ public:
       return Status::IOError(m_path, "file not open");
     }
 
+    emscripten::val fs = GetFS();
+
     // fsync: fs.fsyncSync(fd)
-    m_fs["fsyncSync"](m_fd);
+    fs["fsyncSync"](m_fd);
 
     return Status::OK();
   }
 
 private:
-  emscripten::val m_fs;
   std::string m_path;
   i32 m_fd;
 };
@@ -245,11 +280,12 @@ public:
 // Logger implementation using fd
 class EmLogger : public Logger {
 public:
-  EmLogger(emscripten::val fs, i32 fd) : m_fs(fs), m_fd(fd) {}
+  EmLogger(i32 fd) : m_fd(fd) {}
 
   virtual ~EmLogger() {
     if (m_fd != -1) {
-      m_fs["closeSync"](m_fd);
+      emscripten::val fs = GetFS();
+      fs["closeSync"](m_fd);
     }
   }
 
@@ -258,17 +294,17 @@ public:
     vsnprintf(buffer, sizeof(buffer), format, ap);
 
     if (m_fd != -1) {
+      emscripten::val fs = GetFS();
       size_t len = strlen(buffer);
       emscripten::val buf = emscripten::val::global("Buffer")["from"](
         emscripten::val(emscripten::typed_memory_view(len,
           reinterpret_cast<const unsigned char*>(buffer)))
       );
-      m_fs["writeSync"](m_fd, buf);
+      fs["writeSync"](m_fd, buf);
     }
   }
 
 private:
-  emscripten::val m_fs;
   i32 m_fd;
 };
 
@@ -293,96 +329,107 @@ public:
   virtual Status NewSequentialFile(const std::string& fname, SequentialFile** result) override {
     *result = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open file: fs.openSync(path, 'r')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("r"));
+    emscripten::val fd = fs["openSync"](fname, std::string("r"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
       return Status::NotFound(fname);
     }
 
-    *result = new EmSequentialFile(m_fs, fname, fdNum);
+    *result = new EmSequentialFile(fname, fdNum);
     return Status::OK();
   }
 
   virtual Status NewRandomAccessFile(const std::string& fname, RandomAccessFile** result) override {
     *result = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open file: fs.openSync(path, 'r')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("r"));
+    emscripten::val fd = fs["openSync"](fname, std::string("r"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
       return Status::NotFound(fname);
     }
 
-    *result = new EmRandomAccessFile(m_fs, fname, fdNum);
+    *result = new EmRandomAccessFile(fname, fdNum);
     return Status::OK();
   }
 
   virtual Status NewWritableFile(const std::string& fname, WritableFile** result) override {
     *result = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open file for writing: fs.openSync(path, 'w')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("w"));
+    emscripten::val fd = fs["openSync"](fname, std::string("w"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
       return Status::IOError(fname, "cannot create file");
     }
 
-    *result = new EmWritableFile(m_fs, fname, fdNum);
+    *result = new EmWritableFile(fname, fdNum);
     return Status::OK();
   }
 
   virtual Status NewAppendableFile(const std::string& fname, WritableFile** result) override {
     *result = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open file for appending: fs.openSync(path, 'a')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("a"));
+    emscripten::val fd = fs["openSync"](fname, std::string("a"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
       return Status::IOError(fname, "cannot open file for append");
     }
 
-    *result = new EmWritableFile(m_fs, fname, fdNum);
+    *result = new EmWritableFile(fname, fdNum);
     return Status::OK();
   }
 
   virtual bool FileExists(const std::string& fname) override {
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return false;
     }
+    emscripten::val fs = GetFS();
     // fs.existsSync(path)
-    return m_fs["existsSync"](fname).as<bool>();
+    return fs["existsSync"](fname).as<bool>();
   }
 
   virtual Status GetChildren(const std::string& dir, std::vector<std::string>* result) override {
     result->clear();
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // fs.readdirSync(path)
-    emscripten::val files = m_fs["readdirSync"](dir);
+    emscripten::val files = fs["readdirSync"](dir);
 
     i32 length = files["length"].as<i32>();
     for (i32 i = 0; i < length; ++i) {
@@ -393,22 +440,26 @@ public:
   }
 
   virtual Status DeleteFile(const std::string& fname) override {
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // fs.unlinkSync(path)
-    m_fs["unlinkSync"](fname);
+    fs["unlinkSync"](fname);
     return Status::OK();
   }
 
   virtual Status CreateDir(const std::string& dirname) override {
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Check if directory already exists
-    bool exists = m_fs["existsSync"](dirname).as<bool>();
+    bool exists = fs["existsSync"](dirname).as<bool>();
     if (exists) {
       // Directory already exists, return success
       return Status::OK();
@@ -417,29 +468,33 @@ public:
     // fs.mkdirSync(path, { recursive: false })
     emscripten::val options = emscripten::val::object();
     options.set("recursive", false);
-    m_fs["mkdirSync"](dirname, options);
+    fs["mkdirSync"](dirname, options);
     return Status::OK();
   }
 
   virtual Status DeleteDir(const std::string& dirname) override {
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // fs.rmdirSync(path)
-    m_fs["rmdirSync"](dirname);
+    fs["rmdirSync"](dirname);
     return Status::OK();
   }
 
   virtual Status GetFileSize(const std::string& fname, uint64_t* file_size) override {
     *file_size = 0;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open, fstat, close using fd
-    emscripten::val fd = m_fs["openSync"](fname, std::string("r"));
+    emscripten::val fd = fs["openSync"](fname, std::string("r"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
@@ -447,35 +502,37 @@ public:
     }
 
     // fs.fstatSync(fd)
-    emscripten::val stats = m_fs["fstatSync"](fdNum);
+    emscripten::val stats = fs["fstatSync"](fdNum);
     *file_size = stats["size"].as<u64>();
 
-    m_fs["closeSync"](fdNum);
+    fs["closeSync"](fdNum);
 
     return Status::OK();
   }
 
   virtual Status RenameFile(const std::string& src, const std::string& target) override {
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Check if source file exists first
-    bool exists = m_fs["existsSync"](src).as<bool>();
+    bool exists = fs["existsSync"](src).as<bool>();
     if (!exists) {
       // If source doesn't exist, consider it a success (LevelDB behavior)
       return Status::OK();
     }
 
     // fs.renameSync(oldPath, newPath)
-    m_fs["renameSync"](src, target);
+    fs["renameSync"](src, target);
     return Status::OK();
   }
 
   virtual Status LockFile(const std::string& fname, FileLock** lock) override {
     *lock = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
@@ -484,14 +541,16 @@ public:
       return Status::IOError("lock " + fname, "already held by process");
     }
 
+    emscripten::val fs = GetFS();
+
     // In Node.js single-process environment, we need to handle existing lock files
     // Delete stale lock file if it exists
-    if (m_fs["existsSync"](fname).as<bool>()) {
-      m_fs["unlinkSync"](fname);
+    if (fs["existsSync"](fname).as<bool>()) {
+      fs["unlinkSync"](fname);
     }
 
     // Create new lock file: fs.openSync(path, 'w')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("w"));
+    emscripten::val fd = fs["openSync"](fname, std::string("w"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
@@ -511,8 +570,9 @@ public:
     EmFileLock* my_lock = reinterpret_cast<EmFileLock*>(lock);
     m_locks.Remove(my_lock->name_);
 
-    if (my_lock->fd_ != -1 && !m_fs.isUndefined()) {
-      m_fs["closeSync"](my_lock->fd_);
+    if (my_lock->fd_ != -1 && HasFS()) {
+      emscripten::val fs = GetFS();
+      fs["closeSync"](my_lock->fd_);
     }
 
     delete my_lock;
@@ -567,19 +627,21 @@ public:
   virtual Status NewLogger(const std::string& fname, Logger** result) override {
     *result = nullptr;
 
-    if (m_fs.isUndefined()) {
+    if (!HasFS()) {
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
+    emscripten::val fs = GetFS();
+
     // Open file for writing: fs.openSync(path, 'w')
-    emscripten::val fd = m_fs["openSync"](fname, std::string("w"));
+    emscripten::val fd = fs["openSync"](fname, std::string("w"));
     i32 fdNum = fd.as<i32>();
 
     if (fdNum < 0) {
       return Status::IOError(fname, "cannot create log file");
     }
 
-    *result = new EmLogger(m_fs, fdNum);
+    *result = new EmLogger(fdNum);
     return Status::OK();
   }
 
@@ -632,7 +694,6 @@ private:
     return nullptr;
   }
 
-  emscripten::val m_fs;
   EmLockTable m_locks;
 
   // Background thread state
@@ -658,9 +719,6 @@ namespace leveldb {
 
 EmscriptenEnv::EmscriptenEnv()
     : bgsignal_(&mu_), bgthread_started_(false), shutdown_(false) {
-  if (g_fs != nullptr) {
-    m_fs = *g_fs;
-  }
 }
 
 static Env* default_env = nullptr;
@@ -674,17 +732,18 @@ Env* Env::Default() {
 
 // Set the fs module from JavaScript
 void SetFS(emscripten::val fs) {
-  if (g_fs == nullptr) {
-    g_fs = new emscripten::val(fs);
+  // Initialize thread-local fs for main thread
+  if (tls_fs == nullptr) {
+    tls_fs = new emscripten::val(fs);
   } else {
-    *g_fs = fs;
+    *tls_fs = fs;
   }
 
-  // If default_env already exists, update its fs reference
-  if (default_env != nullptr) {
-    delete default_env;
-    default_env = new EmscriptenEnv();
-  }
+  // Mark fs as initialized
+  g_fs_initialized.store(true, std::memory_order_release);
+
+  // If default_env already exists, it will pick up the new fs through GetFS()
+  // No need to recreate the environment
 }
 
 }  // namespace leveldb
