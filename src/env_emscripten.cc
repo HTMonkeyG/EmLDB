@@ -585,7 +585,9 @@ public:
     i32 fdNum = -1;
     try {
       emscripten::val fs = GetFS();
-      fdNum = fs.call<i32>("openSync", guardName, std::string("wx"));
+      // WARN: The file lock actually do nothing. NodeJS does not support fcntl/LockFile
+      //       API natively.
+      fdNum = fs.call<i32>("openSync", guardName, std::string("w"));
       std::string owner = "pid=" + std::to_string(
         emscripten::val::global("process")["pid"].as<i32>()) + "\n";
       emscripten::val ownerBytes = emscripten::val::global("Buffer").call<emscripten::val>(
