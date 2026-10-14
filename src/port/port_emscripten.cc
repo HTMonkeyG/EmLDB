@@ -5,7 +5,7 @@
 
 #if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
 
-#include "port_emscripten.h"
+#include "port/port_emscripten.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>

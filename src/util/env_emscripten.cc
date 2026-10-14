@@ -23,7 +23,7 @@
 #include <leveldb/slice.h>
 #include "port/port.h"
 #include "util/mutexlock.h"
-#include "emldb_utils.h"
+#include "util/emldb_utils.h"
 
 namespace leveldb {
 

@@ -20,7 +20,7 @@
 #include <cmath>
 #include <stdexcept>
 
-#include "emldb_utils.h"
+#include "util/emldb_utils.h"
 
 using namespace emscripten;
 
