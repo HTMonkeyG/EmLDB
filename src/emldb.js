@@ -153,6 +153,14 @@ class LevelDBOptions {
         throw new Error("compressionLevel requires an explicit compression option");
       }
 
+      if (options.mcneEncryptionKey != null && options.mcneEncryptionKey !== "") {
+        const key = new Uint8Array(8);
+        key.set(toUint8Array(options.mcneEncryptionKey).slice(0, 8));
+        this.opt.setMcneWrapper(true, key);
+      } else {
+        this.opt.setMcneWrapper(false, "");
+      }
+
       // A JS function is represented by an emscripten::val owned by the main
       // runtime thread. LevelDB also invokes comparators from its compaction
       // worker, where that handle is invalid. Reject the unsafe configuration.
@@ -542,6 +550,34 @@ class LevelDB {
     var opt = new LevelDBOptions(options);
     try {
       EmLDB.DB.repair(path, opt.get());
+    } finally {
+      opt.free();
+    }
+  }
+
+  static infer(path, options) {
+    if (!EmLDB)
+      throw new Error("LevelDB not initialized.");
+    assertPath(path);
+
+    var opt = new LevelDBOptions(options)
+      , result = void 0;
+    try {
+      result = EmLDB.DB.infer(path, opt.get());
+    } finally {
+      opt.free();
+      return result;
+    }
+  }
+
+  static encrypt(path, options) {
+    if (!EmLDB)
+      throw new Error("LevelDB not initialized.");
+    assertPath(path);
+
+    var opt = new LevelDBOptions(options);
+    try {
+      EmLDB.DB.encrypt(path, opt.get());
     } finally {
       opt.free();
     }

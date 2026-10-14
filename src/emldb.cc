@@ -21,15 +21,14 @@
 #include <stdexcept>
 
 #include "util/emldb_utils.h"
+#include "mcne/leveldb_mcne.h"
 
 using namespace emscripten;
 
 namespace leveldb {
 
 // Forward declaration of SetFS function from env_emscripten.cc
-#if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
 void SetFS(emscripten::val fs);
-#endif
 
 // ----------------------------------------------------------------------------
 // Compressors
@@ -112,6 +111,16 @@ public:
     m_filterPolicy.reset(NewBloomFilterPolicy(bitsPerKey));
     m_options.filter_policy = m_filterPolicy.get();
   }
+  void setMcneWrapper(bool enable, const val &key) {
+    if (enable) {
+      m_encryptKey = jsArrayToString(key);
+      m_mcneWrapper.reset(new McneWrapper(Env::Default(), m_encryptKey));
+      m_options.env = m_mcneWrapper.get();
+    } else {
+      m_mcneWrapper.reset();
+      m_options.env = Env::Default();
+    }
+  }
 
 private:
   // Compressors have to be packed from slot 0 with no gaps in between:
@@ -145,11 +154,13 @@ private:
   }
 
   Options m_options = {};
+  std::string m_encryptKey = "";
   std::unique_ptr<NoCompression> m_none = {};
   std::unique_ptr<ZlibCompressorRaw> m_zlibRaw = {};
   std::unique_ptr<ZlibCompressor> m_zlib = {};
   std::unique_ptr<Cache> m_cache = {};
   std::unique_ptr<const FilterPolicy> m_filterPolicy = {};
+  std::unique_ptr<McneWrapper> m_mcneWrapper = {};
 };
 
 class ReadOptionsWrapper {
@@ -260,6 +271,23 @@ public:
 
   static void repair(const std::string &path, OptionsWrapper &options) {
     Status status = RepairDB(path, options.get());
+    if (!status.ok()) {
+      throw std::runtime_error(status.ToString());
+    }
+  }
+
+  static val infer(const std::string &path, OptionsWrapper &options) {
+    std::string result;
+    Status status = InferDB(path, options.get(), &result);
+    if (!status.ok()) {
+      throw std::runtime_error(status.ToString());
+    }
+    return stringToJsArray(result);
+  }
+
+  static void encrypt(const std::string &path, OptionsWrapper &options, const val &key) {
+    std::string key_ = jsArrayToString(key);
+    Status status = EncryptDB(path, options.get(), key_);
     if (!status.ok()) {
       throw std::runtime_error(status.ToString());
     }
@@ -406,10 +434,8 @@ private:
 EMSCRIPTEN_BINDINGS(leveldb) {
   using namespace leveldb;
 
-#if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
   // Environment setup
   function("SetFS", &SetFS);
-#endif
 
   // Options classes
   class_<OptionsWrapper>("Options")
@@ -425,7 +451,8 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
     .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
     .function("setCache", &OptionsWrapper::setCache)
-    .function("setBloomFilter", &OptionsWrapper::setBloomFilter);
+    .function("setBloomFilter", &OptionsWrapper::setBloomFilter)
+    .function("setMcneWrapper", &OptionsWrapper::setMcneWrapper);
 
   class_<ReadOptionsWrapper>("ReadOptions")
     .constructor<>()
@@ -468,5 +495,7 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("compactRange", &LevelDBWrapper::compactRange)
     .function("getProperty", &LevelDBWrapper::getProperty)
     .class_function("destroy", &LevelDBWrapper::destroy)
-    .class_function("repair", &LevelDBWrapper::repair);
+    .class_function("repair", &LevelDBWrapper::repair)
+    .class_function("infer", &LevelDBWrapper::infer)
+    .class_function("encrypt", &LevelDBWrapper::encrypt);
 }
