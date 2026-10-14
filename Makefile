@@ -1,4 +1,4 @@
-MAKEFLAGS += -s -j4
+MAKEFLAGS += -s -j6
 .DEFAULT_GOAL := all
 
 DIST_DIR = ./dist
@@ -31,9 +31,7 @@ LFLAGS_COMMON += -s USE_ZLIB=1\
 LFLAGS_FIXED = $(LFLAGS_COMMON) -s INITIAL_MEMORY=128MB -s ALLOW_MEMORY_GROWTH=0
 LFLAGS_GROWTH = $(LFLAGS_COMMON) -s INITIAL_MEMORY=32MB -s MAXIMUM_MEMORY=2GB -s ALLOW_MEMORY_GROWTH=1 -Wno-pthreads-mem-growth
 
-CPP_SRC = emldb_utils.cc\
-	emldb.cc\
-	db/builder.cc\
+CPP_SRC = db/builder.cc\
 	db/db_impl.cc\
 	db/db_iter.cc\
 	db/dbformat.cc\
@@ -71,6 +69,8 @@ CPP_SRC = emldb_utils.cc\
 	db/zlib_compressor.cc\
 	db/zstd_compressor.cc\
 	port/port_emscripten.cc\
+	emldb_utils.cc\
+	emldb.cc\
 	env_emscripten.cc
 CPP_OBJ = $(addprefix $(DIST_DIR)/, $(notdir $(CPP_SRC:.cc=.o)))
 DEP_FILES = $(CPP_OBJ:.o=.d)

@@ -88,76 +88,76 @@ class LevelDBOptions {
     LevelDBOptions.GC.register(this, this.opt, this);
 
     try {
-    // Apply options
-    if (options.createIfMissing != null) {
-      assertBoolean(options.createIfMissing, "createIfMissing");
-      this.opt.setCreateIfMissing(options.createIfMissing);
-    }
-    if (options.errorIfExists != null) {
-      assertBoolean(options.errorIfExists, "errorIfExists");
-      this.opt.setErrorIfExists(options.errorIfExists);
-    }
-    if (options.paranoidChecks != null) {
-      assertBoolean(options.paranoidChecks, "paranoidChecks");
-      this.opt.setParanoidChecks(options.paranoidChecks);
-    }
-    if (options.writeBufferSize != null) {
-      assertInteger(options.writeBufferSize, "writeBufferSize", 1, 0xffffffff);
-      this.opt.setWriteBufferSize(options.writeBufferSize);
-    }
-    if (options.maxOpenFiles != null) {
-      assertInteger(options.maxOpenFiles, "maxOpenFiles", 1, 0x7fffffff);
-      this.opt.setMaxOpenFiles(options.maxOpenFiles);
-    }
-    if (options.blockSize != null) {
-      assertInteger(options.blockSize, "blockSize", 1, 0xffffffff);
-      this.opt.setBlockSize(options.blockSize);
-    }
-    if (options.blockRestartInterval != null) {
-      assertInteger(options.blockRestartInterval, "blockRestartInterval", 1, 0x7fffffff);
-      this.opt.setBlockRestartInterval(options.blockRestartInterval);
-    }
-    if (options.cacheSize != null) {
-      assertInteger(options.cacheSize, "cacheSize", 0, 0xffffffff);
-      if (options.cacheSize > 0)
-        this.opt.setCache(options.cacheSize);
-    }
-    if (options.bloomFilterBits != null) {
-      assertInteger(options.bloomFilterBits, "bloomFilterBits", 0, 0x7fffffff);
-      if (options.bloomFilterBits > 0)
-        this.opt.setBloomFilter(options.bloomFilterBits);
-    }
-
-    if (options.compression != null) {
-      const level = options.compressionLevel == null ? -1 : options.compressionLevel;
-      assertInteger(level, "compressionLevel", -1, 9);
-
-      switch (options.compression) {
-        case LevelDB.COMPRESSIONS.NONE:
-          if (options.compressionLevel != null)
-            throw new Error("compressionLevel is not valid with NONE compression");
-          this.opt.setNoCompression();
-          break;
-        case LevelDB.COMPRESSIONS.ZLIB:
-          this.opt.setZlibCompression(level);
-          break;
-        case LevelDB.COMPRESSIONS.ZLIB_RAW:
-          this.opt.setZlibRawCompression(level);
-          break;
-        case LevelDB.COMPRESSIONS.SNAPPY:
-          throw new Error("SNAPPY compression is not included in this build");
-        default:
-          throw new RangeError("compression must be one of LevelDB.COMPRESSIONS");
+      // Apply options
+      if (options.createIfMissing != null) {
+        assertBoolean(options.createIfMissing, "createIfMissing");
+        this.opt.setCreateIfMissing(options.createIfMissing);
       }
-    } else if (options.compressionLevel != null) {
-      throw new Error("compressionLevel requires an explicit compression option");
-    }
+      if (options.errorIfExists != null) {
+        assertBoolean(options.errorIfExists, "errorIfExists");
+        this.opt.setErrorIfExists(options.errorIfExists);
+      }
+      if (options.paranoidChecks != null) {
+        assertBoolean(options.paranoidChecks, "paranoidChecks");
+        this.opt.setParanoidChecks(options.paranoidChecks);
+      }
+      if (options.writeBufferSize != null) {
+        assertInteger(options.writeBufferSize, "writeBufferSize", 1, 0xffffffff);
+        this.opt.setWriteBufferSize(options.writeBufferSize);
+      }
+      if (options.maxOpenFiles != null) {
+        assertInteger(options.maxOpenFiles, "maxOpenFiles", 1, 0x7fffffff);
+        this.opt.setMaxOpenFiles(options.maxOpenFiles);
+      }
+      if (options.blockSize != null) {
+        assertInteger(options.blockSize, "blockSize", 1, 0xffffffff);
+        this.opt.setBlockSize(options.blockSize);
+      }
+      if (options.blockRestartInterval != null) {
+        assertInteger(options.blockRestartInterval, "blockRestartInterval", 1, 0x7fffffff);
+        this.opt.setBlockRestartInterval(options.blockRestartInterval);
+      }
+      if (options.cacheSize != null) {
+        assertInteger(options.cacheSize, "cacheSize", 0, 0xffffffff);
+        if (options.cacheSize > 0)
+          this.opt.setCache(options.cacheSize);
+      }
+      if (options.bloomFilterBits != null) {
+        assertInteger(options.bloomFilterBits, "bloomFilterBits", 0, 0x7fffffff);
+        if (options.bloomFilterBits > 0)
+          this.opt.setBloomFilter(options.bloomFilterBits);
+      }
 
-    // A JS function is represented by an emscripten::val owned by the main
-    // runtime thread. LevelDB also invokes comparators from its compaction
-    // worker, where that handle is invalid. Reject the unsafe configuration.
-    if (options.comparator != null)
-      throw new Error("JavaScript comparators are not supported by the threaded build");
+      if (options.compression != null) {
+        const level = options.compressionLevel == null ? -1 : options.compressionLevel;
+        assertInteger(level, "compressionLevel", -1, 9);
+
+        switch (options.compression) {
+          case LevelDB.COMPRESSIONS.NONE:
+            if (options.compressionLevel != null)
+              throw new Error("compressionLevel is not valid with NONE compression");
+            this.opt.setNoCompression();
+            break;
+          case LevelDB.COMPRESSIONS.ZLIB:
+            this.opt.setZlibCompression(level);
+            break;
+          case LevelDB.COMPRESSIONS.ZLIB_RAW:
+            this.opt.setZlibRawCompression(level);
+            break;
+          case LevelDB.COMPRESSIONS.SNAPPY:
+            throw new Error("SNAPPY compression is not included in this build");
+          default:
+            throw new RangeError("compression must be one of LevelDB.COMPRESSIONS");
+        }
+      } else if (options.compressionLevel != null) {
+        throw new Error("compressionLevel requires an explicit compression option");
+      }
+
+      // A JS function is represented by an emscripten::val owned by the main
+      // runtime thread. LevelDB also invokes comparators from its compaction
+      // worker, where that handle is invalid. Reject the unsafe configuration.
+      if (options.comparator != null)
+        throw new Error("JavaScript comparators are not supported by the threaded build");
     } catch (error) {
       this.free();
       throw error;
@@ -193,14 +193,14 @@ class LevelDBReadOptions {
     LevelDBReadOptions.GC.register(this, this.opt, this);
 
     try {
-    if (options.verifyChecksums != null) {
-      assertBoolean(options.verifyChecksums, "verifyChecksums");
-      this.opt.setVerifyChecksums(options.verifyChecksums);
-    }
-    if (options.fillCache != null) {
-      assertBoolean(options.fillCache, "fillCache");
-      this.opt.setFillCache(options.fillCache);
-    }
+      if (options.verifyChecksums != null) {
+        assertBoolean(options.verifyChecksums, "verifyChecksums");
+        this.opt.setVerifyChecksums(options.verifyChecksums);
+      }
+      if (options.fillCache != null) {
+        assertBoolean(options.fillCache, "fillCache");
+        this.opt.setFillCache(options.fillCache);
+      }
     } catch (error) {
       this.free();
       throw error;
@@ -236,10 +236,10 @@ class LevelDBWriteOptions {
     LevelDBWriteOptions.GC.register(this, this.opt, this);
 
     try {
-    if (options.sync != null) {
-      assertBoolean(options.sync, "sync");
-      this.opt.setSync(options.sync);
-    }
+      if (options.sync != null) {
+        assertBoolean(options.sync, "sync");
+        this.opt.setSync(options.sync);
+      }
     } catch (error) {
       this.free();
       throw error;
