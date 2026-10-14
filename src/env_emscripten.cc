@@ -446,6 +446,15 @@ public:
 
     emscripten::val fs = GetFS();
 
+    // Check if file exists.
+    if (!fs["existsSync"](fname).as<bool>())
+      // Fail if directory does not exist.
+      return Status::NotFound(fname);
+
+    //if (fs["statSync"](fname)["isDirectory"]().as<bool>())
+      // Fail if the target is not a directory.
+      //return Status::NotFound(fname);
+
     // fs.unlinkSync(path)
     fs["unlinkSync"](fname);
     return Status::OK();
@@ -478,6 +487,15 @@ public:
     }
 
     emscripten::val fs = GetFS();
+
+    // Check if directory exists.
+    if (!fs["existsSync"](dirname).as<bool>())
+      // Fail if directory does not exist.
+      return Status::NotFound(dirname);
+
+    //if (!fs["statSync"](dirname)["isDirectory"]().as<bool>())
+      // Fail if the target is not a directory.
+      //return Status::NotFound(dirname);
 
     // fs.rmdirSync(path)
     fs["rmdirSync"](dirname);
