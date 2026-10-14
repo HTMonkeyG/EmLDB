@@ -1,6 +1,6 @@
 {
   "name": "emldb",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "description": "An Emscripten compilation of MCBE compatible LevelDB.",
   "main": "main.js",
   "files": [
@@ -8,9 +8,7 @@
     "main.js",
     "src/emldb.js",
     "dist/libleveldb.js",
-    "dist/libleveldb.wasm",
-    "dist/libleveldb-growth.js",
-    "dist/libleveldb-growth.wasm"
+    "dist/libleveldb-growth.js"
   ],
   "scripts": {
     "test": "npm run build && node --test test/*.test.js",
