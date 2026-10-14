@@ -12,9 +12,9 @@ CFLAGS = -std=c++11 -O3 -pthread
 CFLAGS += -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include -I./src
 CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_EMSCRIPTEN
 CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
-CFLAGS += -g
+#CFLAGS += -g
 
-LFLAGS = -lm -flto --bind -msimd128 # -lnoderawfs.js -lnodefs.js
+LFLAGS = -lm -flto --bind -msimd128
 LFLAGS += -s USE_ZLIB=1\
 	-s INITIAL_MEMORY=128MB\
 	-s TOTAL_STACK=32MB\
@@ -23,9 +23,6 @@ LFLAGS += -s USE_ZLIB=1\
 	-s MODULARIZE=1\
 	-s EXPORT_NAME='LevelDB'\
 	-s INVOKE_RUN=0\
-	-s EXPORTED_RUNTIME_METHODS=FS\
-	-s FORCE_FILESYSTEM=1\
-	-s NODERAWFS=1\
 	-s WASMFS=0\
 	-s ALLOW_MEMORY_GROWTH=1\
 	-s PTHREAD_POOL_SIZE=1
