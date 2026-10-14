@@ -322,22 +322,22 @@ public:
   }
 
   virtual void Logv(const char *format, va_list ap) override {
-    va_list copy;
-    va_copy(copy, ap);
-    int required = vsnprintf(nullptr, 0, format, copy);
-    va_end(copy);
-    if (required < 0 || m_fd == -1) return;
+    if (m_fd == -1) return;
 
-    std::vector<char> buffer(static_cast<size_t>(required) + 1);
-    vsnprintf(buffer.data(), buffer.size(), format, ap);
+    char buffer[500];
+    int len = vsnprintf(buffer, sizeof(buffer), format, ap);
+    if (len > 0 && (len < sizeof(buffer) - 1) && buffer[len - 1] != '\n') {
+      buffer[len - 1] = '\n';
+      buffer[len] = '0';
+    }
 
     if (m_fd != -1) {
       try {
         emscripten::val fs = GetFS();
-        size_t len = static_cast<size_t>(required);
-        emscripten::val buf = emscripten::val(
-          emscripten::typed_memory_view(len,
-            reinterpret_cast<const unsigned char *>(buffer.data())));
+        emscripten::val buf = emscripten::val(emscripten::typed_memory_view(
+          static_cast<size_t>(len),
+          reinterpret_cast<const unsigned char *>(buffer)
+        ));
         fs.call<size_t>("writeSync", m_fd, buf);
       } catch (...) { }
     }
@@ -581,7 +581,7 @@ public:
     // fail-safe cross-process guard. It is removed on clean unlock; after a
     // crash it intentionally requires explicit operator recovery rather than
     // guessing that another process's lock is stale.
-    const std::string guardName = fname + ".emldb-lock";
+    const std::string guardName = fname;
     i32 fdNum = -1;
     try {
       emscripten::val fs = GetFS();
@@ -604,8 +604,7 @@ public:
           emscripten::val fs = GetFS();
           fs.call<void>("closeSync", fdNum);
           if (fs.call<bool>("existsSync", guardName)) fs.call<void>("unlinkSync", guardName);
-        } catch (...) {
-        }
+        } catch (...) { }
       }
       m_locks.Remove(fname);
       return FsError(guardName, "acquire database lock", error);

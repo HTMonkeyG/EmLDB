@@ -19,6 +19,7 @@ CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
 LFLAGS_COMMON = -lm -flto --bind -msimd128 -fexceptions
 LFLAGS_COMMON += -s USE_ZLIB=1\
 	-s TOTAL_STACK=4MB\
+	-s SINGLE_FILE=1\
 	-s WASM=1\
 	-s MODULARIZE=1\
 	-s EXPORT_NAME='LevelDB'\

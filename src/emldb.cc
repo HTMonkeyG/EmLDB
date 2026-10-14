@@ -32,40 +32,6 @@ void SetFS(emscripten::val fs);
 #endif
 
 // ----------------------------------------------------------------------------
-// JavaScript Comparator Wrapper
-// ----------------------------------------------------------------------------
-
-// Bridges JavaScript comparison function to LevelDB Comparator interface.
-class JSComparator: public Comparator {
-public:
-  JSComparator(val jsFunc, const std::string &name): m_jsCompare(jsFunc), m_name(name) { }
-  JSComparator(const JSComparator &) = delete;
-  JSComparator &operator=(const JSComparator &) = delete;
-
-  virtual ~JSComparator() noexcept override = default;
-
-  virtual int Compare(const Slice &a, const Slice &b) const override {
-    val a_array = stringToJsArray(std::string(a.data(), a.size()));
-    val b_array = stringToJsArray(std::string(b.data(), b.size()));
-    double result = m_jsCompare(a_array, b_array).as<double>();
-    if (!std::isfinite(result)) {
-      throw std::runtime_error("Comparator must return a finite number");
-    }
-    return result < 0 ? -1 : (result > 0 ? 1 : 0);
-  }
-
-  virtual cstring Name() const override { return m_name.c_str(); }
-
-  // These are optional optimization methods.
-  virtual void FindShortestSeparator(std::string *, const Slice &) const override { }
-  virtual void FindShortSuccessor(std::string *) const override { }
-
-private:
-  val m_jsCompare = {};
-  std::string m_name = "";
-};
-
-// ----------------------------------------------------------------------------
 // Compressors
 // ----------------------------------------------------------------------------
 
@@ -136,7 +102,6 @@ public:
     m_zlibRaw = emldb::make_unique<ZlibCompressorRaw>(level);
     m_installCompressors(m_zlibRaw.get());
   }
-  void setComparator(val jsFunc, const std::string &name) { m_comparator = emldb::make_unique<JSComparator>(jsFunc, name); m_options.comparator = m_comparator.get(); }
   void setCache(size_t capacity) {
     if (capacity == 0) throw std::invalid_argument("cache capacity must be positive");
     m_cache.reset(NewLRUCache(capacity));
@@ -183,7 +148,6 @@ private:
   std::unique_ptr<NoCompression> m_none = {};
   std::unique_ptr<ZlibCompressorRaw> m_zlibRaw = {};
   std::unique_ptr<ZlibCompressor> m_zlib = {};
-  std::unique_ptr<JSComparator> m_comparator = {};
   std::unique_ptr<Cache> m_cache = {};
   std::unique_ptr<const FilterPolicy> m_filterPolicy = {};
 };
@@ -460,7 +424,6 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("setNoCompression", &OptionsWrapper::setNoCompression)
     .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
     .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
-    .function("setComparator", &OptionsWrapper::setComparator)
     .function("setCache", &OptionsWrapper::setCache)
     .function("setBloomFilter", &OptionsWrapper::setBloomFilter);
 
