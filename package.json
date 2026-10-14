@@ -7,12 +7,21 @@
     "main.d.ts",
     "main.js",
     "src/emldb.js",
-    "dist/libleveldb.js"
+    "dist/libleveldb.js",
+    "dist/libleveldb.wasm",
+    "dist/libleveldb-growth.js",
+    "dist/libleveldb-growth.wasm"
   ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "make clean && make",
-    "clean": "make clean"
+    "test": "npm run build && node --test test/*.test.js",
+    "test:runtime": "node --test test/*.test.js",
+    "check": "node --check main.js && node --check src/emldb.js",
+    "benchmark": "node benchmark/io.js",
+    "build": "node scripts/build.js",
+    "clean": "node scripts/clean.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "repository": {
     "type": "git",

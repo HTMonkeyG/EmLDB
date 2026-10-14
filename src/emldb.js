@@ -1,5 +1,22 @@
-const EmLDBModule = require("../dist/libleveldb.js");
 var EmLDB = null;
+var EmLDBPromise = null;
+var EmLDBMemoryProfile = null;
+
+function resolveModule(profile) {
+  return profile === "scalable"
+    ? require("../dist/libleveldb-growth.js")
+    : require("../dist/libleveldb.js");
+}
+
+function normalizeInitializationOptions(options) {
+  if (options == null) options = {};
+  if (typeof options !== "object" || Array.isArray(options))
+    throw new TypeError("initialization options must be an object");
+  const memory = options.memory == null ? "performance" : options.memory;
+  if (memory !== "performance" && memory !== "scalable")
+    throw new RangeError('memory must be "performance" or "scalable"');
+  return memory;
+}
 
 // ----------------------------------------------------------------------------
 // [SECTION] UTILS
@@ -20,6 +37,39 @@ function toUint8Array(data) {
   throw new Error("Data must be a string or Uint8Array");
 }
 
+function assertBoolean(value, name) {
+  if (typeof value !== "boolean")
+    throw new TypeError(`${name} must be a boolean`);
+}
+
+function assertInteger(value, name, min, max) {
+  if (!Number.isSafeInteger(value) || value < min || value > max)
+    throw new RangeError(`${name} must be an integer between ${min} and ${max}`);
+}
+
+function assertPath(path) {
+  if (typeof path !== "string" || path.length === 0)
+    throw new TypeError("path must be a non-empty string");
+  if (path.includes("\0"))
+    throw new TypeError("path must not contain NUL characters");
+}
+
+function releaseDBState(state) {
+  if (!state)
+    return;
+
+  if (state.db) {
+    try { state.db.close(); } catch (_) { }
+    try { state.db.delete(); } catch (_) { }
+  }
+
+  for (const name of ["opt", "defaultReadOpt", "defaultWriteOpt"]) {
+    try {
+      if (state[name]) state[name].free();
+    } catch (_) { }
+  }
+}
+
 // ----------------------------------------------------------------------------
 // [SECTION] OPTIONS
 // ----------------------------------------------------------------------------
@@ -30,33 +80,87 @@ class LevelDBOptions {
   });
 
   constructor(options = {}) {
+    if (options == null) options = {};
+    if (typeof options !== "object" || Array.isArray(options))
+      throw new TypeError("options must be an object");
     this.opt = new EmLDB.Options();
 
     LevelDBOptions.GC.register(this, this.opt, this);
 
-    // Apply options
-    if (options.createIfMissing != null)
-      this.opt.setCreateIfMissing(options.createIfMissing);
-    if (options.errorIfExists != null)
-      this.opt.setErrorIfExists(options.errorIfExists);
-    if (options.paranoidChecks != null)
-      this.opt.setParanoidChecks(options.paranoidChecks);
-    if (options.writeBufferSize != null)
-      this.opt.setWriteBufferSize(options.writeBufferSize);
-    if (options.maxOpenFiles != null)
-      this.opt.setMaxOpenFiles(options.maxOpenFiles);
-    if (options.blockSize != null)
-      this.opt.setBlockSize(options.blockSize);
-    if (options.blockRestartInterval != null)
-      this.opt.setBlockRestartInterval(options.blockRestartInterval);
-    if (options.cacheSize != null)
-      this.opt.setCache(options.cacheSize);
-    if (options.bloomFilterBits != null)
-      this.opt.setBloomFilter(options.bloomFilterBits);
+    try {
+      // Apply options
+      if (options.createIfMissing != null) {
+        assertBoolean(options.createIfMissing, "createIfMissing");
+        this.opt.setCreateIfMissing(options.createIfMissing);
+      }
+      if (options.errorIfExists != null) {
+        assertBoolean(options.errorIfExists, "errorIfExists");
+        this.opt.setErrorIfExists(options.errorIfExists);
+      }
+      if (options.paranoidChecks != null) {
+        assertBoolean(options.paranoidChecks, "paranoidChecks");
+        this.opt.setParanoidChecks(options.paranoidChecks);
+      }
+      if (options.writeBufferSize != null) {
+        assertInteger(options.writeBufferSize, "writeBufferSize", 1, 0xffffffff);
+        this.opt.setWriteBufferSize(options.writeBufferSize);
+      }
+      if (options.maxOpenFiles != null) {
+        assertInteger(options.maxOpenFiles, "maxOpenFiles", 1, 0x7fffffff);
+        this.opt.setMaxOpenFiles(options.maxOpenFiles);
+      }
+      if (options.blockSize != null) {
+        assertInteger(options.blockSize, "blockSize", 1, 0xffffffff);
+        this.opt.setBlockSize(options.blockSize);
+      }
+      if (options.blockRestartInterval != null) {
+        assertInteger(options.blockRestartInterval, "blockRestartInterval", 1, 0x7fffffff);
+        this.opt.setBlockRestartInterval(options.blockRestartInterval);
+      }
+      if (options.cacheSize != null) {
+        assertInteger(options.cacheSize, "cacheSize", 0, 0xffffffff);
+        if (options.cacheSize > 0)
+          this.opt.setCache(options.cacheSize);
+      }
+      if (options.bloomFilterBits != null) {
+        assertInteger(options.bloomFilterBits, "bloomFilterBits", 0, 0x7fffffff);
+        if (options.bloomFilterBits > 0)
+          this.opt.setBloomFilter(options.bloomFilterBits);
+      }
 
-    // Custom comparator support
-    if (options.comparator != null && typeof options.comparator === "function") {
-      this.opt.setComparator(options.comparator, options.comparatorName || "custom");
+      if (options.compression != null) {
+        const level = options.compressionLevel == null ? -1 : options.compressionLevel;
+        assertInteger(level, "compressionLevel", -1, 9);
+
+        switch (options.compression) {
+          case LevelDB.COMPRESSIONS.NONE:
+            if (options.compressionLevel != null)
+              throw new Error("compressionLevel is not valid with NONE compression");
+            this.opt.setNoCompression();
+            break;
+          case LevelDB.COMPRESSIONS.ZLIB:
+            this.opt.setZlibCompression(level);
+            break;
+          case LevelDB.COMPRESSIONS.ZLIB_RAW:
+            this.opt.setZlibRawCompression(level);
+            break;
+          case LevelDB.COMPRESSIONS.SNAPPY:
+            throw new Error("SNAPPY compression is not included in this build");
+          default:
+            throw new RangeError("compression must be one of LevelDB.COMPRESSIONS");
+        }
+      } else if (options.compressionLevel != null) {
+        throw new Error("compressionLevel requires an explicit compression option");
+      }
+
+      // A JS function is represented by an emscripten::val owned by the main
+      // runtime thread. LevelDB also invokes comparators from its compaction
+      // worker, where that handle is invalid. Reject the unsafe configuration.
+      if (options.comparator != null)
+        throw new Error("JavaScript comparators are not supported by the threaded build");
+    } catch (error) {
+      this.free();
+      throw error;
     }
   }
 
@@ -69,8 +173,9 @@ class LevelDBOptions {
       return;
 
     LevelDBOptions.GC.unregister(this);
-    this.opt.delete();
+    const opt = this.opt;
     this.opt = null;
+    opt.delete();
   }
 }
 
@@ -80,14 +185,26 @@ class LevelDBReadOptions {
   });
 
   constructor(options = {}) {
+    if (options == null) options = {};
+    if (typeof options !== "object" || Array.isArray(options))
+      throw new TypeError("read options must be an object");
     this.opt = new EmLDB.ReadOptions();
 
     LevelDBReadOptions.GC.register(this, this.opt, this);
 
-    if (options.verifyChecksums != null)
-      this.opt.setVerifyChecksums(options.verifyChecksums);
-    if (options.fillCache != null)
-      this.opt.setFillCache(options.fillCache);
+    try {
+      if (options.verifyChecksums != null) {
+        assertBoolean(options.verifyChecksums, "verifyChecksums");
+        this.opt.setVerifyChecksums(options.verifyChecksums);
+      }
+      if (options.fillCache != null) {
+        assertBoolean(options.fillCache, "fillCache");
+        this.opt.setFillCache(options.fillCache);
+      }
+    } catch (error) {
+      this.free();
+      throw error;
+    }
   }
 
   get() {
@@ -99,8 +216,9 @@ class LevelDBReadOptions {
       return;
 
     LevelDBReadOptions.GC.unregister(this);
-    this.opt.delete();
+    const opt = this.opt;
     this.opt = null;
+    opt.delete();
   }
 }
 
@@ -110,12 +228,22 @@ class LevelDBWriteOptions {
   });
 
   constructor(options = {}) {
+    if (options == null) options = {};
+    if (typeof options !== "object" || Array.isArray(options))
+      throw new TypeError("write options must be an object");
     this.opt = new EmLDB.WriteOptions();
 
     LevelDBWriteOptions.GC.register(this, this.opt, this);
 
-    if (options.sync != null)
-      this.opt.setSync(options.sync);
+    try {
+      if (options.sync != null) {
+        assertBoolean(options.sync, "sync");
+        this.opt.setSync(options.sync);
+      }
+    } catch (error) {
+      this.free();
+      throw error;
+    }
   }
 
   get() {
@@ -127,8 +255,9 @@ class LevelDBWriteOptions {
       return;
 
     LevelDBWriteOptions.GC.unregister(this);
-    this.opt.delete();
+    const opt = this.opt;
     this.opt = null;
+    opt.delete();
   }
 }
 
@@ -142,11 +271,14 @@ class LevelDBWriteBatch {
   });
 
   constructor() {
+    if (!EmLDB)
+      throw new Error("LevelDB not initialized.");
     this.batch = new EmLDB.WriteBatch();
     LevelDBWriteBatch.GC.register(this, this.batch, this);
   }
 
   put(key, value) {
+    this.validate();
     key = toUint8Array(key);
     value = toUint8Array(value);
     this.batch.put(key, value);
@@ -154,18 +286,26 @@ class LevelDBWriteBatch {
   }
 
   del(key) {
+    this.validate();
     key = toUint8Array(key);
     this.batch.del(key);
     return this;
   }
 
   clear() {
+    this.validate();
     this.batch.clear();
     return this;
   }
 
   get() {
+    this.validate();
     return this.batch;
+  }
+
+  validate() {
+    if (!this.batch)
+      throw new Error("try to access freed write batch.");
   }
 
   free() {
@@ -173,8 +313,9 @@ class LevelDBWriteBatch {
       return;
 
     LevelDBWriteBatch.GC.unregister(this);
-    this.batch.delete();
+    const batch = this.batch;
     this.batch = null;
+    batch.delete();
   }
 }
 
@@ -207,9 +348,13 @@ class LevelDBIteratorBase {
     if (!this.iter)
       return;
 
-    this.iter.delete();
+    if (this.owner)
+      this.owner.releaseDerivative(this);
     LevelDBIteratorBase.GC.unregister(this);
+    const iter = this.iter;
     this.iter = null;
+    this.owner = null;
+    iter.delete();
   }
 
   seekToFirst() {
@@ -259,30 +404,52 @@ class LevelDBIteratorBase {
 class LevelDBIterator {
   constructor(base) {
     this.base = base;
-    this.base.seekToFirst();
+    try {
+      this.base.seekToFirst();
+    } catch (error) {
+      this.base.free();
+      this.base = null;
+      throw error;
+    }
   }
 
   next() {
-    if (!this.base.valid()) {
-      return {
-        done: true
-      };
+    if (!this.base)
+      return { done: true, value: undefined };
+
+    const base = this.base;
+    try {
+      if (!base.valid()) {
+        base.getError();
+        base.free();
+        this.base = null;
+        return { done: true, value: undefined };
+      }
+
+      const key = base.key();
+      const value = base.value();
+      base.next();
+
+      if (!base.valid()) {
+        base.getError();
+        base.free();
+        this.base = null;
+      }
+
+      return { value: [key, value], done: false };
+    } catch (error) {
+      try { base.free(); } catch (_) { }
+      this.base = null;
+      throw error;
     }
+  }
 
-    var key = this.base.key();
-    var value = this.base.value();
-    var valid;
-
-    this.base.next();
-    valid = this.base.valid();
-
-    if (!valid)
+  return() {
+    if (this.base) {
       this.base.free();
-
-    return {
-      value: [key, value],
-      done: false
-    };
+      this.base = null;
+    }
+    return { done: true, value: undefined };
   }
 
   [Symbol.iterator]() {
@@ -321,6 +488,8 @@ class LevelDBValueIterator extends LevelDBIterator {
 // ----------------------------------------------------------------------------
 
 class LevelDB {
+  static GC = createGCListener(releaseDBState);
+
   static COMPRESSIONS = {
     NONE: 0,
     SNAPPY: 1,
@@ -328,15 +497,34 @@ class LevelDB {
     ZLIB_RAW: 4
   };
 
-  static async initialize() {
-    var module = await EmLDBModule();
-    EmLDB = module;
-    return true;
+  static async initialize(options) {
+    const memory = normalizeInitializationOptions(options);
+    if (EmLDBMemoryProfile && EmLDBMemoryProfile !== memory)
+      throw new Error(`LevelDB is already initialized with the ${EmLDBMemoryProfile} memory profile`);
+
+    if (!EmLDBPromise) {
+      EmLDBMemoryProfile = memory;
+      EmLDBPromise = resolveModule(memory)().then(function (module) {
+        module.SetFS(require("fs"));
+        EmLDB = module;
+        return true;
+      }).catch(function (error) {
+        EmLDBPromise = null;
+        EmLDBMemoryProfile = null;
+        throw error;
+      });
+    }
+    return EmLDBPromise;
+  }
+
+  static get memoryProfile() {
+    return EmLDBMemoryProfile;
   }
 
   static destroy(path, options) {
     if (!EmLDB)
       throw new Error("LevelDB not initialized.");
+    assertPath(path);
 
     var opt = new LevelDBOptions(options);
     try {
@@ -349,6 +537,7 @@ class LevelDB {
   static repair(path, options) {
     if (!EmLDB)
       throw new Error("LevelDB not initialized.");
+    assertPath(path);
 
     var opt = new LevelDBOptions(options);
     try {
@@ -361,15 +550,18 @@ class LevelDB {
   constructor(path, options) {
     if (!EmLDB)
       throw new Error("LevelDB not initialized.");
+    assertPath(path);
+    if (options != null && (typeof options !== "object" || Array.isArray(options)))
+      throw new TypeError("options must be an object");
 
     this.path = path;
     this.options = options || {};
     this.db = null;
     this.opt = null;
-    this.derivatives = [];
-
-    this.defaultWriteOpt = new LevelDBWriteOptions();
-    this.defaultReadOpt = new LevelDBReadOptions();
+    this.derivatives = new Set();
+    this.derivativeGC = createGCListener((ref) => this.derivatives.delete(ref));
+    this.defaultWriteOpt = null;
+    this.defaultReadOpt = null;
   }
 
   validate() {
@@ -377,18 +569,33 @@ class LevelDB {
       throw new Error("try to access DB before it's open.");
   }
 
+  releaseDerivative(iterator) {
+    if (iterator.derivativeRef)
+      this.derivatives.delete(iterator.derivativeRef);
+    this.derivativeGC.unregister(iterator);
+    iterator.derivativeRef = null;
+  }
+
   open() {
     if (this.db)
       throw new Error("try to open DB that is already open.");
 
-    var opt = new LevelDBOptions(this.options);
-    var db = new EmLDB.DB();
+    var opt = null;
+    var db = null;
+    var defaultWriteOpt = null;
+    var defaultReadOpt = null;
 
     try {
+      opt = new LevelDBOptions(this.options);
+      db = new EmLDB.DB();
+      defaultWriteOpt = new LevelDBWriteOptions();
+      defaultReadOpt = new LevelDBReadOptions();
       db.open(this.path, opt.get());
     } catch (e) {
-      db.delete();
-      opt.free();
+      try { if (db) db.delete(); } catch (_) { }
+      try { if (opt) opt.free(); } catch (_) { }
+      try { if (defaultWriteOpt) defaultWriteOpt.free(); } catch (_) { }
+      try { if (defaultReadOpt) defaultReadOpt.free(); } catch (_) { }
       throw e;
     }
 
@@ -396,6 +603,14 @@ class LevelDB {
     // policy, comparator), so the options have to outlive it - see close().
     this.opt = opt;
     this.db = db;
+    this.defaultWriteOpt = defaultWriteOpt;
+    this.defaultReadOpt = defaultReadOpt;
+    LevelDB.GC.register(this, {
+      db,
+      opt,
+      defaultWriteOpt,
+      defaultReadOpt
+    }, this);
     return true;
   }
 
@@ -409,21 +624,19 @@ class LevelDB {
       if (!obj)
         continue;
       try {
+        this.derivativeGC.unregister(obj);
         obj.free();
       } catch (e) {
         // Iterator might already be freed, ignore
       }
     }
 
-    try {
-      this.db.close();
-    } catch (e) {
-      console.error('Error closing database:', e);
-    }
-
-    this.db.delete();
+    LevelDB.GC.unregister(this);
+    var closeError = null;
+    try { this.db.close(); } catch (e) { closeError = e; }
+    try { this.db.delete(); } catch (e) { if (!closeError) closeError = e; }
     this.db = null;
-    this.derivatives = [];
+    this.derivatives.clear();
 
     // Only now may the options (and the cache / filter policy / comparator they
     // own) be released: the db was referencing them all along.
@@ -432,15 +645,27 @@ class LevelDB {
       this.opt = null;
     }
 
+    if (this.defaultReadOpt) {
+      this.defaultReadOpt.free();
+      this.defaultReadOpt = null;
+    }
+    if (this.defaultWriteOpt) {
+      this.defaultWriteOpt.free();
+      this.defaultWriteOpt = null;
+    }
+
+    if (closeError)
+      throw closeError;
+
     return true;
   }
 
   put(key, value, options) {
     this.validate();
 
-    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
     key = toUint8Array(key);
     value = toUint8Array(value);
+    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
     try {
       this.db.put(key, value, wopt.get());
@@ -453,8 +678,8 @@ class LevelDB {
   delete(key, options) {
     this.validate();
 
-    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
     key = toUint8Array(key);
+    var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
     try {
       this.db.del(key, wopt.get());
@@ -466,6 +691,8 @@ class LevelDB {
 
   write(batch, options) {
     this.validate();
+    if (!(batch instanceof LevelDBWriteBatch))
+      throw new TypeError("batch must be a LevelDBWriteBatch");
 
     var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
@@ -480,13 +707,28 @@ class LevelDB {
   batch(operations) {
     var batch = new LevelDBWriteBatch();
 
-    if (Array.isArray(operations)) {
-      for (var op of operations) {
-        if (op.type === "put")
-          batch.put(op.key, op.value);
-        else if (op.type === "del")
-          batch.del(op.key);
+    try {
+      if (operations != null && !Array.isArray(operations))
+        throw new TypeError("operations must be an array");
+
+      if (Array.isArray(operations)) {
+        for (var op of operations) {
+          if (!op || typeof op !== "object")
+            throw new TypeError("batch operations must be objects");
+          if (op.type === "put") {
+            if (op.value == null)
+              throw new TypeError("put operations require a value");
+            batch.put(op.key, op.value);
+          } else if (op.type === "del") {
+            batch.del(op.key);
+          } else {
+            throw new Error(`unknown batch operation type: ${op.type}`);
+          }
+        }
       }
+    } catch (error) {
+      batch.free();
+      throw error;
     }
 
     return batch;
@@ -495,13 +737,13 @@ class LevelDB {
   get(key, options) {
     this.validate();
 
-    var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
     key = toUint8Array(key);
+    var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
 
     try {
       return this.db.get(key, ropt.get());
     } finally {
-      if (ropt != this.defaultWriteOpt) ropt.free();
+      if (ropt != this.defaultReadOpt) ropt.free();
     }
   }
 
@@ -518,6 +760,8 @@ class LevelDB {
 
   getProperty(property) {
     this.validate();
+    if (typeof property !== "string" || property.length === 0)
+      throw new TypeError("property must be a non-empty string");
     return this.db.getProperty(property);
   }
 
@@ -530,13 +774,18 @@ class LevelDB {
     try {
       iter = this.db.createIterator(ropt.get());
     } finally {
-      if (ropt != this.defaultWriteOpt) ropt.free();
+      if (ropt != this.defaultReadOpt) ropt.free();
     }
 
     var result = new LevelDBIteratorBase(iter);
 
-    // Add a WeakRef to record all derived objects
-    this.derivatives.push(new WeakRef(result));
+    // Track live iterators without retaining them. Closing the DB can then
+    // release native iterators before destroying their backing database.
+    const ref = new WeakRef(result);
+    result.owner = this;
+    result.derivativeRef = ref;
+    this.derivatives.add(ref);
+    this.derivativeGC.register(result, ref, result);
     return result;
   }
 
