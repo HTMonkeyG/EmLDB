@@ -7,13 +7,17 @@
 #if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
 
 #include <atomic>
+#include <cstdarg>
+#include <cstdio>
 #include <pthread.h>
 #include <string.h>
 #include <string>
+#include <stdexcept>
 #include <vector>
 #include <deque>
 #include <set>
 #include <emscripten.h>
+#include <emscripten/threading.h>
 #include <emscripten/val.h>
 #include <leveldb/env.h>
 #include <leveldb/slice.h>
@@ -56,6 +60,24 @@ inline bool HasFS() {
   return g_fs_initialized.load(std::memory_order_acquire);
 }
 
+Status FsError(const std::string& path, const std::string& operation,
+               const emscripten::val& error) {
+  std::string message = operation + " failed";
+  std::string code;
+  try {
+    emscripten::val detail = error["message"];
+    if (!detail.isUndefined() && !detail.isNull()) {
+      message += ": " + detail.as<std::string>();
+    }
+    emscripten::val errorCode = error["code"];
+    if (!errorCode.isUndefined() && !errorCode.isNull()) {
+      code = errorCode.as<std::string>();
+    }
+  } catch (...) { }
+  if (code == "ENOENT") return Status::NotFound(path, message);
+  return Status::IOError(path, message);
+}
+
 }  // anonymous namespace
 
 // Sequential file implementation using Node.js fs.open/read/close
@@ -69,8 +91,10 @@ public:
 
   virtual ~EmSequentialFile() noexcept {
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](m_fd);
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", m_fd);
+      } catch (...) { }
     }
   }
 
@@ -79,28 +103,18 @@ public:
       return Status::NotFound(m_path);
     }
 
-    emscripten::val fs = GetFS();
-
-    // Create a Buffer for reading
-    emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
-
-    // Read data: fs.readSync(fd, buffer, 0, length, null)
-    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
-    i32 bytesRead = bytesReadVal.as<i32>();
-
-    if (bytesRead < 0) {
+    try {
+      emscripten::val fs = GetFS();
+      emscripten::val target = emscripten::val(
+        emscripten::typed_memory_view(n, reinterpret_cast<unsigned char*>(scratch)));
+      size_t bytesRead = fs.call<size_t>(
+        "readSync", m_fd, target, 0, n, emscripten::val::null());
+      *result = Slice(scratch, bytesRead);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
       *result = Slice();
-      return Status::IOError(m_path, "read failed");
+      return FsError(m_path, "read", error);
     }
-
-    // Copy data from Buffer to scratch
-    for (i32 i = 0; i < bytesRead; ++i) {
-      scratch[i] = static_cast<char>(buffer[i].as<u08>());
-    }
-
-    *result = Slice(scratch, bytesRead);
-
-    return Status::OK();
   }
 
   virtual Status Skip(u64 n) override {
@@ -108,18 +122,24 @@ public:
       return Status::NotFound(m_path);
     }
 
-    emscripten::val fs = GetFS();
-
-    // Read and discard data to simulate skip
-    emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
-    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, emscripten::val::null());
-    i32 bytesRead = bytesReadVal.as<i32>();
-
-    if (bytesRead < 0) {
-      return Status::IOError(m_path, "skip failed");
+    // Node does not expose lseek. Advance in bounded chunks instead of
+    // allocating a buffer proportional to an arbitrary skip distance.
+    const size_t kChunkSize = 64 * 1024;
+    try {
+      emscripten::val fs = GetFS();
+      emscripten::val buffer = emscripten::val::global("Buffer").call<emscripten::val>(
+        "allocUnsafe", kChunkSize);
+      while (n > 0) {
+        size_t chunk = n < kChunkSize ? static_cast<size_t>(n) : kChunkSize;
+        size_t bytesRead = fs.call<size_t>(
+          "readSync", m_fd, buffer, 0, chunk, emscripten::val::null());
+        if (bytesRead == 0) break;
+        n -= bytesRead;
+      }
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(m_path, "skip", error);
     }
-
-    return Status::OK();
   }
 
 private:
@@ -138,8 +158,10 @@ public:
 
   virtual ~EmRandomAccessFile() noexcept {
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](m_fd);
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", m_fd);
+      } catch (...) { }
     }
   }
 
@@ -150,28 +172,18 @@ public:
       return Status::NotFound(m_path);
     }
 
-    emscripten::val fs = GetFS();
-
-    // Create a Buffer for reading
-    emscripten::val buffer = emscripten::val::global("Buffer")["alloc"](n);
-
-    // Read at offset: fs.readSync(fd, buffer, 0, length, position)
-    emscripten::val bytesReadVal = fs["readSync"](m_fd, buffer, 0, n, static_cast<double>(offset));
-    i32 bytesRead = bytesReadVal.as<i32>();
-
-    if (bytesRead < 0) {
+    try {
+      emscripten::val fs = GetFS();
+      emscripten::val target = emscripten::val(
+        emscripten::typed_memory_view(n, reinterpret_cast<unsigned char*>(scratch)));
+      size_t bytesRead = fs.call<size_t>(
+        "readSync", m_fd, target, 0, n, static_cast<double>(offset));
+      *result = Slice(scratch, bytesRead);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
       *result = Slice();
-      return Status::IOError(m_path, "read failed");
+      return FsError(m_path, "random read", error);
     }
-
-    // Copy data from Buffer to scratch
-    for (i32 i = 0; i < bytesRead; ++i) {
-      scratch[i] = static_cast<char>(buffer[i].as<u08>());
-    }
-
-    *result = Slice(scratch, bytesRead);
-
-    return Status::OK();
   }
 
 private:
@@ -190,8 +202,10 @@ public:
 
   virtual ~EmWritableFile() noexcept {
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](m_fd);
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", m_fd);
+      } catch (...) { }
     }
   }
 
@@ -202,29 +216,35 @@ public:
       return Status::IOError(m_path, "file not open");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Convert Slice to Buffer
-    emscripten::val buffer = emscripten::val::global("Buffer")["from"](
-      emscripten::val(emscripten::typed_memory_view(data.size(),
-        reinterpret_cast<const unsigned char*>(data.data())))
-    );
-
-    // Write: fs.writeSync(fd, buffer)
-    emscripten::val bytesWritten = fs["writeSync"](m_fd, buffer);
-
-    if (bytesWritten.as<size_t>() != data.size()) {
-      return Status::IOError(m_path, "write incomplete");
+    try {
+      emscripten::val fs = GetFS();
+      size_t offset = 0;
+      while (offset < data.size()) {
+        const size_t remaining = data.size() - offset;
+        emscripten::val buffer = emscripten::val(
+          emscripten::typed_memory_view(remaining,
+            reinterpret_cast<const unsigned char*>(data.data() + offset)));
+        size_t bytesWritten = fs.call<size_t>("writeSync", m_fd, buffer);
+        if (bytesWritten == 0 || bytesWritten > remaining) {
+          return Status::IOError(m_path, "write made no progress");
+        }
+        offset += bytesWritten;
+      }
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(m_path, "write", error);
     }
-
-    return Status::OK();
   }
 
   virtual Status Close() override {
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](m_fd);
-      m_fd = -1;
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", m_fd);
+        m_fd = -1;
+      } catch (const emscripten::val& error) {
+        return FsError(m_path, "close", error);
+      }
     }
     return Status::OK();
   }
@@ -239,12 +259,13 @@ public:
       return Status::IOError(m_path, "file not open");
     }
 
-    emscripten::val fs = GetFS();
-
-    // fsync: fs.fsyncSync(fd)
-    fs["fsyncSync"](m_fd);
-
-    return Status::OK();
+    try {
+      emscripten::val fs = GetFS();
+      fs.call<void>("fsyncSync", m_fd);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(m_path, "fsync", error);
+    }
   }
 
 private:
@@ -252,11 +273,12 @@ private:
   i32 m_fd;
 };
 
-// File lock implementation (simplified for single-process environment)
+// File lock backed by an atomically-created cross-process guard file.
 class EmFileLock : public FileLock {
 public:
   i32 fd_;
   std::string name_;
+  std::string guard_name_;
 };
 
 // Lock table to prevent multiple locks on same file
@@ -284,23 +306,32 @@ public:
 
   virtual ~EmLogger() {
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](m_fd);
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", m_fd);
+      } catch (...) { }
     }
   }
 
   virtual void Logv(const char* format, va_list ap) override {
-    char buffer[500];
-    vsnprintf(buffer, sizeof(buffer), format, ap);
+    va_list copy;
+    va_copy(copy, ap);
+    int required = vsnprintf(nullptr, 0, format, copy);
+    va_end(copy);
+    if (required < 0 || m_fd == -1) return;
+
+    std::vector<char> buffer(static_cast<size_t>(required) + 1);
+    vsnprintf(buffer.data(), buffer.size(), format, ap);
 
     if (m_fd != -1) {
-      emscripten::val fs = GetFS();
-      size_t len = strlen(buffer);
-      emscripten::val buf = emscripten::val::global("Buffer")["from"](
-        emscripten::val(emscripten::typed_memory_view(len,
-          reinterpret_cast<const unsigned char*>(buffer)))
-      );
-      fs["writeSync"](m_fd, buf);
+      try {
+        emscripten::val fs = GetFS();
+        size_t len = static_cast<size_t>(required);
+        emscripten::val buf = emscripten::val(
+          emscripten::typed_memory_view(len,
+            reinterpret_cast<const unsigned char*>(buffer.data())));
+        fs.call<size_t>("writeSync", m_fd, buf);
+      } catch (...) { }
     }
   }
 
@@ -333,18 +364,14 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open file: fs.openSync(path, 'r')
-    emscripten::val fd = fs["openSync"](fname, std::string("r"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::NotFound(fname);
+    try {
+      emscripten::val fs = GetFS();
+      i32 fdNum = fs.call<i32>("openSync", fname, std::string("r"));
+      *result = new EmSequentialFile(fname, fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "open sequential file", error);
     }
-
-    *result = new EmSequentialFile(fname, fdNum);
-    return Status::OK();
   }
 
   virtual Status NewRandomAccessFile(const std::string& fname, RandomAccessFile** result) override {
@@ -354,18 +381,14 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open file: fs.openSync(path, 'r')
-    emscripten::val fd = fs["openSync"](fname, std::string("r"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::NotFound(fname);
+    try {
+      emscripten::val fs = GetFS();
+      i32 fdNum = fs.call<i32>("openSync", fname, std::string("r"));
+      *result = new EmRandomAccessFile(fname, fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "open random access file", error);
     }
-
-    *result = new EmRandomAccessFile(fname, fdNum);
-    return Status::OK();
   }
 
   virtual Status NewWritableFile(const std::string& fname, WritableFile** result) override {
@@ -375,18 +398,14 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open file for writing: fs.openSync(path, 'w')
-    emscripten::val fd = fs["openSync"](fname, std::string("w"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::IOError(fname, "cannot create file");
+    try {
+      emscripten::val fs = GetFS();
+      i32 fdNum = fs.call<i32>("openSync", fname, std::string("w"));
+      *result = new EmWritableFile(fname, fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "create writable file", error);
     }
-
-    *result = new EmWritableFile(fname, fdNum);
-    return Status::OK();
   }
 
   virtual Status NewAppendableFile(const std::string& fname, WritableFile** result) override {
@@ -396,27 +415,26 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open file for appending: fs.openSync(path, 'a')
-    emscripten::val fd = fs["openSync"](fname, std::string("a"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::IOError(fname, "cannot open file for append");
+    try {
+      emscripten::val fs = GetFS();
+      i32 fdNum = fs.call<i32>("openSync", fname, std::string("a"));
+      *result = new EmWritableFile(fname, fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "open appendable file", error);
     }
-
-    *result = new EmWritableFile(fname, fdNum);
-    return Status::OK();
   }
 
   virtual bool FileExists(const std::string& fname) override {
     if (!HasFS()) {
       return false;
     }
-    emscripten::val fs = GetFS();
-    // fs.existsSync(path)
-    return fs["existsSync"](fname).as<bool>();
+    try {
+      emscripten::val fs = GetFS();
+      return fs.call<bool>("existsSync", fname);
+    } catch (...) {
+      return false;
+    }
   }
 
   virtual Status GetChildren(const std::string& dir, std::vector<std::string>* result) override {
@@ -426,17 +444,17 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // fs.readdirSync(path)
-    emscripten::val files = fs["readdirSync"](dir);
-
-    i32 length = files["length"].as<i32>();
-    for (i32 i = 0; i < length; ++i) {
-      result->push_back(files[i].as<std::string>());
+    try {
+      emscripten::val fs = GetFS();
+      emscripten::val files = fs.call<emscripten::val>("readdirSync", dir);
+      i32 length = files["length"].as<i32>();
+      for (i32 i = 0; i < length; ++i) {
+        result->push_back(files[i].as<std::string>());
+      }
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(dir, "read directory", error);
     }
-
-    return Status::OK();
   }
 
   virtual Status DeleteFile(const std::string& fname) override {
@@ -444,11 +462,17 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // fs.unlinkSync(path)
-    fs["unlinkSync"](fname);
-    return Status::OK();
+    try {
+      emscripten::val fs = GetFS();
+      if (!fs.call<bool>("existsSync", fname))
+        return Status::NotFound(fname);
+      if (fs.call<emscripten::val>("statSync", fname).call<bool>("isDirectory"))
+        return Status::IOError(fname, "expected a file, found a directory");
+      fs.call<void>("unlinkSync", fname);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "delete file", error);
+    }
   }
 
   virtual Status CreateDir(const std::string& dirname) override {
@@ -456,20 +480,20 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Check if directory already exists
-    bool exists = fs["existsSync"](dirname).as<bool>();
-    if (exists) {
-      // Directory already exists, return success
+    try {
+      emscripten::val fs = GetFS();
+      if (fs.call<bool>("existsSync", dirname)) {
+        if (!fs.call<emscripten::val>("statSync", dirname).call<bool>("isDirectory"))
+          return Status::IOError(dirname, "path exists and is not a directory");
+        return Status::OK();
+      }
+      emscripten::val options = emscripten::val::object();
+      options.set("recursive", false);
+      fs.call<void>("mkdirSync", dirname, options);
       return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(dirname, "create directory", error);
     }
-
-    // fs.mkdirSync(path, { recursive: false })
-    emscripten::val options = emscripten::val::object();
-    options.set("recursive", false);
-    fs["mkdirSync"](dirname, options);
-    return Status::OK();
   }
 
   virtual Status DeleteDir(const std::string& dirname) override {
@@ -477,11 +501,17 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // fs.rmdirSync(path)
-    fs["rmdirSync"](dirname);
-    return Status::OK();
+    try {
+      emscripten::val fs = GetFS();
+      if (!fs.call<bool>("existsSync", dirname))
+        return Status::NotFound(dirname);
+      if (!fs.call<emscripten::val>("statSync", dirname).call<bool>("isDirectory"))
+        return Status::IOError(dirname, "expected a directory, found a file");
+      fs.call<void>("rmdirSync", dirname);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(dirname, "delete directory", error);
+    }
   }
 
   virtual Status GetFileSize(const std::string& fname, uint64_t* file_size) override {
@@ -491,23 +521,20 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open, fstat, close using fd
-    emscripten::val fd = fs["openSync"](fname, std::string("r"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::NotFound(fname);
+    i32 fdNum = -1;
+    try {
+      emscripten::val fs = GetFS();
+      fdNum = fs.call<i32>("openSync", fname, std::string("r"));
+      emscripten::val stats = fs.call<emscripten::val>("fstatSync", fdNum);
+      *file_size = stats["size"].as<u64>();
+      fs.call<void>("closeSync", fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      if (fdNum != -1) {
+        try { GetFS().call<void>("closeSync", fdNum); } catch (...) { }
+      }
+      return FsError(fname, "get file size", error);
     }
-
-    // fs.fstatSync(fd)
-    emscripten::val stats = fs["fstatSync"](fdNum);
-    *file_size = stats["size"].as<u64>();
-
-    fs["closeSync"](fdNum);
-
-    return Status::OK();
   }
 
   virtual Status RenameFile(const std::string& src, const std::string& target) override {
@@ -515,18 +542,15 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Check if source file exists first
-    bool exists = fs["existsSync"](src).as<bool>();
-    if (!exists) {
-      // If source doesn't exist, consider it a success (LevelDB behavior)
+    try {
+      emscripten::val fs = GetFS();
+      if (!fs.call<bool>("existsSync", src))
+        return Status::NotFound(src);
+      fs.call<void>("renameSync", src, target);
       return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(src, "rename to " + target, error);
     }
-
-    // fs.renameSync(oldPath, newPath)
-    fs["renameSync"](src, target);
-    return Status::OK();
   }
 
   virtual Status LockFile(const std::string& fname, FileLock** lock) override {
@@ -541,55 +565,68 @@ public:
       return Status::IOError("lock " + fname, "already held by process");
     }
 
-    emscripten::val fs = GetFS();
+    // Node core does not expose flock. Use an atomically-created sidecar as a
+    // fail-safe cross-process guard. It is removed on clean unlock; after a
+    // crash it intentionally requires explicit operator recovery rather than
+    // guessing that another process's lock is stale.
+    const std::string guardName = fname + ".emldb-lock";
+    i32 fdNum = -1;
+    try {
+      emscripten::val fs = GetFS();
+      fdNum = fs.call<i32>("openSync", guardName, std::string("wx"));
+      std::string owner = "pid=" + std::to_string(
+        emscripten::val::global("process")["pid"].as<i32>()) + "\n";
+      emscripten::val ownerBytes = emscripten::val::global("Buffer").call<emscripten::val>(
+        "from", owner);
+      fs.call<size_t>("writeSync", fdNum, ownerBytes);
 
-    // In Node.js single-process environment, we need to handle existing lock files
-    // Delete stale lock file if it exists
-    if (fs["existsSync"](fname).as<bool>()) {
-      fs["unlinkSync"](fname);
-    }
-
-    // Create new lock file: fs.openSync(path, 'w')
-    emscripten::val fd = fs["openSync"](fname, std::string("w"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
+      EmFileLock* my_lock = new EmFileLock;
+      my_lock->fd_ = fdNum;
+      my_lock->name_ = fname;
+      my_lock->guard_name_ = guardName;
+      *lock = my_lock;
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      if (fdNum != -1) {
+        try {
+          emscripten::val fs = GetFS();
+          fs.call<void>("closeSync", fdNum);
+          if (fs.call<bool>("existsSync", guardName)) fs.call<void>("unlinkSync", guardName);
+        } catch (...) { }
+      }
       m_locks.Remove(fname);
-      return Status::IOError("lock " + fname, "cannot create lock file");
+      return FsError(guardName, "acquire database lock", error);
     }
-
-    EmFileLock* my_lock = new EmFileLock;
-    my_lock->fd_ = fdNum;
-    my_lock->name_ = fname;
-    *lock = my_lock;
-
-    return Status::OK();
   }
 
   virtual Status UnlockFile(FileLock* lock) override {
     EmFileLock* my_lock = reinterpret_cast<EmFileLock*>(lock);
-    m_locks.Remove(my_lock->name_);
-
+    Status status = Status::OK();
     if (my_lock->fd_ != -1 && HasFS()) {
-      emscripten::val fs = GetFS();
-      fs["closeSync"](my_lock->fd_);
+      try {
+        emscripten::val fs = GetFS();
+        fs.call<void>("closeSync", my_lock->fd_);
+        if (fs.call<bool>("existsSync", my_lock->guard_name_))
+          fs.call<void>("unlinkSync", my_lock->guard_name_);
+      } catch (const emscripten::val& error) {
+        status = FsError(my_lock->guard_name_, "release database lock", error);
+      }
     }
-
+    m_locks.Remove(my_lock->name_);
     delete my_lock;
-    return Status::OK();
+    return status;
   }
 
   virtual void Schedule(void (*function)(void*), void* arg) override {
-    MutexLock lock(&mu_);
+    mu_.Lock();
 
     // Start background thread if necessary
     if (!bgthread_started_) {
       bgthread_started_ = true;
       if (pthread_create(&bgthread_, nullptr, &EmscriptenEnv::BGThreadWrapper, this) != 0) {
         bgthread_started_ = false;
-        // Fallback: execute immediately if thread creation fails
-        function(arg);
-        return;
+        mu_.Unlock();
+        throw std::runtime_error("unable to start LevelDB background thread");
       }
     }
 
@@ -599,6 +636,7 @@ public:
     queue_.back().arg = arg;
 
     bgsignal_.Signal();
+    mu_.Unlock();
   }
 
   virtual void StartThread(void (*function)(void* arg), void* arg) override {
@@ -608,10 +646,8 @@ public:
 
     pthread_t thread;
     if (pthread_create(&thread, nullptr, &StartThreadWrapper, state) != 0) {
-      // If thread creation fails, clean up and execute immediately
       delete state;
-      function(arg);
-      return;
+      throw std::runtime_error("unable to start LevelDB worker thread");
     }
 
     // Detach the thread so it can run independently
@@ -620,8 +656,7 @@ public:
 
   virtual Status GetTestDirectory(std::string* result) override {
     *result = "/tmp/leveldbtest";
-    CreateDir(*result);
-    return Status::OK();
+    return CreateDir(*result);
   }
 
   virtual Status NewLogger(const std::string& fname, Logger** result) override {
@@ -631,30 +666,29 @@ public:
       return Status::IOError("fs module not initialized", "call SetFS first");
     }
 
-    emscripten::val fs = GetFS();
-
-    // Open file for writing: fs.openSync(path, 'w')
-    emscripten::val fd = fs["openSync"](fname, std::string("w"));
-    i32 fdNum = fd.as<i32>();
-
-    if (fdNum < 0) {
-      return Status::IOError(fname, "cannot create log file");
+    try {
+      emscripten::val fs = GetFS();
+      i32 fdNum = fs.call<i32>("openSync", fname, std::string("w"));
+      *result = new EmLogger(fdNum);
+      return Status::OK();
+    } catch (const emscripten::val& error) {
+      return FsError(fname, "create logger", error);
     }
-
-    *result = new EmLogger(fdNum);
-    return Status::OK();
   }
 
   virtual uint64_t NowMicros() override {
-    // Use Date.now() which returns milliseconds since epoch
-    emscripten::val date = emscripten::val::global("Date");
-    double millis = date["now"]().as<double>();
+    emscripten::val performance = emscripten::val::global("performance");
+    double millis;
+    if (!performance.isUndefined() && !performance.isNull()) {
+      millis = performance["timeOrigin"].as<double>() + performance.call<double>("now");
+    } else {
+      millis = emscripten::val::global("Date").call<double>("now");
+    }
     return static_cast<u64>(millis * 1000);
   }
 
   virtual void SleepForMicroseconds(int micros) override {
-    // Emscripten doesn't support synchronous sleep in single-threaded mode
-    // This is a no-op in browser/Node.js environment
+    if (micros > 0) emscripten_thread_sleep(static_cast<double>(micros) / 1000.0);
   }
 
 private:
@@ -721,12 +755,9 @@ EmscriptenEnv::EmscriptenEnv()
     : bgsignal_(&mu_), bgthread_started_(false), shutdown_(false) {
 }
 
-static Env* default_env = nullptr;
-
 Env* Env::Default() {
-  if (default_env == nullptr) {
-    default_env = new EmscriptenEnv();
-  }
+  // C++11 guarantees thread-safe initialization of function-local statics.
+  static Env* default_env = new EmscriptenEnv();
   return default_env;
 }
 
@@ -742,7 +773,7 @@ void SetFS(emscripten::val fs) {
   // Mark fs as initialized
   g_fs_initialized.store(true, std::memory_order_release);
 
-  // If default_env already exists, it will pick up the new fs through GetFS()
+  // If the default environment already exists, it will pick up the new fs through GetFS()
   // No need to recreate the environment
 }
 

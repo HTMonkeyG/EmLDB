@@ -17,6 +17,8 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <cmath>
+#include <stdexcept>
 
 #include "emldb_utils.h"
 
@@ -45,7 +47,11 @@ public:
   virtual int Compare(const Slice &a, const Slice &b) const override {
     val a_array = stringToJsArray(std::string(a.data(), a.size()));
     val b_array = stringToJsArray(std::string(b.data(), b.size()));
-    return m_jsCompare(a_array, b_array).as<int>();
+    double result = m_jsCompare(a_array, b_array).as<double>();
+    if (!std::isfinite(result)) {
+      throw std::runtime_error("Comparator must return a finite number");
+    }
+    return result < 0 ? -1 : (result > 0 ? 1 : 0);
   }
 
   virtual cstring Name() const override { return m_name.c_str(); }
@@ -63,38 +69,21 @@ private:
 // Compressors
 // ----------------------------------------------------------------------------
 
-// Compressors must outlive every DB that references them: Options only stores
-// raw pointers, while emldb.js frees its OptionsWrapper right after open().
-// This pool keeps them alive for the lifetime of the module.
-class CompressorPool {
+// Slot zero selects the compressor used for new blocks. A pass-through
+// compressor lets us select uncompressed output while keeping the zlib
+// decompressors packed into subsequent slots for reading existing MCBE data.
+class NoCompression: public Compressor {
 public:
-  static CompressorPool &Get() {
-    static CompressorPool *instance = new CompressorPool();  // never destroyed
-    return *instance;
+  NoCompression(): Compressor(0) { }
+
+  virtual void compressImpl(const char *input, size_t length, std::string &output) const override {
+    output.assign(input, length);
   }
 
-  // The level is only honoured on first use: a compressor already held by an
-  // open DB must not be recreated, otherwise that DB is left with a dangling
-  // pointer.
-  Compressor *zlibRaw(int level) {
-    if (!m_zlibraw) m_zlibraw = emldb::make_unique<ZlibCompressorRaw>(level);
-    return m_zlibraw.get();
+  virtual bool decompress(const char *input, size_t length, std::string &output) const override {
+    output.assign(input, length);
+    return true;
   }
-
-  Compressor *zlib(int level) {
-    if (!m_zlib) m_zlib = emldb::make_unique<ZlibCompressor>(level);
-    return m_zlib.get();
-  }
-
-private:
-  CompressorPool() { }
-
-  std::unique_ptr<Compressor> m_zlibraw = {};
-  std::unique_ptr<Compressor> m_zlib = {};
-
-  // No copying allowed
-  CompressorPool(const CompressorPool &);
-  void operator=(const CompressorPool &);
 };
 
 // ----------------------------------------------------------------------------
@@ -106,8 +95,11 @@ public:
   ~OptionsWrapper() = default;
   OptionsWrapper() {
     m_options.create_if_missing = true;
+    m_none = emldb::make_unique<NoCompression>();
+    m_zlibRaw = emldb::make_unique<ZlibCompressorRaw>(-1);
+    m_zlib = emldb::make_unique<ZlibCompressor>(-1);
     // Default to raw-zlib (ID 4), the compression MCBE itself writes.
-    m_installCompressors(CompressorPool::Get().zlibRaw(-1));
+    m_installCompressors(m_zlibRaw.get());
   }
   OptionsWrapper(const OptionsWrapper &) = delete;
   OptionsWrapper &operator=(const OptionsWrapper &) = delete;
@@ -117,15 +109,44 @@ public:
   void setCreateIfMissing(bool value) { m_options.create_if_missing = value; }
   void setErrorIfExists(bool value) { m_options.error_if_exists = value; }
   void setParanoidChecks(bool value) { m_options.paranoid_checks = value; }
-  void setWriteBufferSize(size_t size) { m_options.write_buffer_size = size; }
-  void setMaxOpenFiles(int num) { m_options.max_open_files = num; }
-  void setBlockSize(size_t size) { m_options.block_size = size; }
-  void setBlockRestartInterval(int interval) { m_options.block_restart_interval = interval; }
-  void setZlibCompression(int level) { m_installCompressors(CompressorPool::Get().zlib(level)); }
-  void setZlibRawCompression(int level) { m_installCompressors(CompressorPool::Get().zlibRaw(level)); }
+  void setWriteBufferSize(size_t size) {
+    if (size == 0) throw std::invalid_argument("write buffer size must be positive");
+    m_options.write_buffer_size = size;
+  }
+  void setMaxOpenFiles(int num) {
+    if (num <= 0) throw std::invalid_argument("max open files must be positive");
+    m_options.max_open_files = num;
+  }
+  void setBlockSize(size_t size) {
+    if (size == 0) throw std::invalid_argument("block size must be positive");
+    m_options.block_size = size;
+  }
+  void setBlockRestartInterval(int interval) {
+    if (interval <= 0) throw std::invalid_argument("block restart interval must be positive");
+    m_options.block_restart_interval = interval;
+  }
+  void setNoCompression() { m_installCompressors(m_none.get()); }
+  void setZlibCompression(int level) {
+    m_validateCompressionLevel(level);
+    m_zlib = emldb::make_unique<ZlibCompressor>(level);
+    m_installCompressors(m_zlib.get());
+  }
+  void setZlibRawCompression(int level) {
+    m_validateCompressionLevel(level);
+    m_zlibRaw = emldb::make_unique<ZlibCompressorRaw>(level);
+    m_installCompressors(m_zlibRaw.get());
+  }
   void setComparator(val jsFunc, const std::string &name) { m_comparator = emldb::make_unique<JSComparator>(jsFunc, name); m_options.comparator = m_comparator.get(); }
-  void setCache(size_t capacity) { m_cache.reset(NewLRUCache(capacity)); m_options.block_cache = m_cache.get(); }
-  void setBloomFilter(int bitsPerKey) { m_filterPolicy.reset(NewBloomFilterPolicy(bitsPerKey)); m_options.filter_policy = m_filterPolicy.get(); }
+  void setCache(size_t capacity) {
+    if (capacity == 0) throw std::invalid_argument("cache capacity must be positive");
+    m_cache.reset(NewLRUCache(capacity));
+    m_options.block_cache = m_cache.get();
+  }
+  void setBloomFilter(int bitsPerKey) {
+    if (bitsPerKey <= 0) throw std::invalid_argument("bloom filter bits must be positive");
+    m_filterPolicy.reset(NewBloomFilterPolicy(bitsPerKey));
+    m_options.filter_policy = m_filterPolicy.get();
+  }
 
 private:
   // Compressors have to be packed from slot 0 with no gaps in between:
@@ -135,8 +156,7 @@ private:
   //     one (`if (!c || c->uniqueCompressionID == compressionID)`), so a hole
   //     silently disables every compressor placed after it.
   void m_installCompressors(Compressor *writer) {
-    CompressorPool &pool = CompressorPool::Get();
-    Compressor *wanted[] = {writer, pool.zlibRaw(-1), pool.zlib(-1)};
+    Compressor *wanted[] = {writer, m_zlibRaw.get(), m_zlib.get()};
     const int wantedCount = sizeof(wanted) / sizeof(wanted[0]);
 
     for (int i = 0; i < 256; ++i) {
@@ -153,7 +173,16 @@ private:
     }
   }
 
+  void m_validateCompressionLevel(int level) {
+    if (level < -1 || level > 9) {
+      throw std::invalid_argument("compression level must be between -1 and 9");
+    }
+  }
+
   Options m_options = {};
+  std::unique_ptr<NoCompression> m_none = {};
+  std::unique_ptr<ZlibCompressorRaw> m_zlibRaw = {};
+  std::unique_ptr<ZlibCompressor> m_zlib = {};
   std::unique_ptr<JSComparator> m_comparator = {};
   std::unique_ptr<Cache> m_cache = {};
   std::unique_ptr<const FilterPolicy> m_filterPolicy = {};
@@ -428,6 +457,7 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("setMaxOpenFiles", &OptionsWrapper::setMaxOpenFiles)
     .function("setBlockSize", &OptionsWrapper::setBlockSize)
     .function("setBlockRestartInterval", &OptionsWrapper::setBlockRestartInterval)
+    .function("setNoCompression", &OptionsWrapper::setNoCompression)
     .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
     .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
     .function("setComparator", &OptionsWrapper::setComparator)

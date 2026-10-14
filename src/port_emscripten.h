@@ -9,7 +9,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <string>
-#include <endian.h>
+#include <atomic>
 
 // Emscripten is little-endian
 #define PLATFORM_IS_LITTLE_ENDIAN true
@@ -74,21 +74,14 @@ uint32_t AcceleratedCRC32C(uint32_t crc, const char* buf, size_t size);
 // Atomic pointer implementation
 class AtomicPointer {
  private:
-  void* rep_;
+  std::atomic<void*> rep_;
  public:
-  AtomicPointer() { }
+  AtomicPointer() : rep_(nullptr) { }
   explicit AtomicPointer(void* p) : rep_(p) {}
-  inline void* NoBarrier_Load() const { return rep_; }
-  inline void NoBarrier_Store(void* v) { rep_ = v; }
-  inline void* Acquire_Load() const {
-    void* result = rep_;
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return result;
-  }
-  inline void Release_Store(void* v) {
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    rep_ = v;
-  }
+  inline void* NoBarrier_Load() const { return rep_.load(std::memory_order_relaxed); }
+  inline void NoBarrier_Store(void* v) { rep_.store(v, std::memory_order_relaxed); }
+  inline void* Acquire_Load() const { return rep_.load(std::memory_order_acquire); }
+  inline void Release_Store(void* v) { rep_.store(v, std::memory_order_release); }
 };
 
 } // namespace port

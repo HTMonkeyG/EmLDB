@@ -8,7 +8,7 @@ export interface LevelDBOptions {
   /**
    * If true, the database will be created if it is missing.
    *
-   * Default: false
+   * Default: true
    */
   createIfMissing?: boolean;
 
@@ -26,6 +26,22 @@ export interface LevelDBOptions {
    * Default: false
    */
   paranoidChecks?: boolean;
+
+  /**
+   * Compression used for newly written blocks. Existing zlib and raw-zlib
+   * blocks remain readable regardless of this choice.
+   *
+   * Default: LevelDB.COMPRESSIONS.ZLIB_RAW
+   */
+  compression?: 0 | 2 | 4;
+
+  /**
+   * zlib compression level, from 0 through 9, or -1 for the zlib default.
+   * Requires compression to be ZLIB or ZLIB_RAW.
+   *
+   * Default: -1
+   */
+  compressionLevel?: number;
 
   /**
    * Amount of data to build up in memory (backed by an unsorted log
@@ -94,16 +110,22 @@ export interface LevelDBOptions {
    * REQUIRES: The comparator must have the same name and orders keys
    * *exactly* the same as the comparator provided to previous open calls.
    *
-   * Default: undefined (lexicographic byte-wise ordering)
+   * @deprecated JavaScript comparators are rejected by the threaded build
+   * because Emscripten JS handles cannot safely cross worker threads.
    */
   comparator?: (a: Uint8Array, b: Uint8Array) => number;
 
   /**
    * Name for the custom comparator. Required if comparator is provided.
    *
-   * Default: undefined
+   * @deprecated See comparator.
    */
   comparatorName?: string;
+}
+
+export interface LevelDBInitializationOptions {
+  /** Fixed 128MB heap for maximum pthread performance, or growable heap up to 2GB. */
+  memory?: 'performance' | 'scalable';
 }
 
 /**
@@ -146,6 +168,10 @@ export interface LevelDBWriteOptions {
   sync?: boolean;
 }
 
+export type LevelDBBatchOperation =
+  | { type: 'put'; key: Uint8Array | string; value: Uint8Array | string }
+  | { type: 'del'; key: Uint8Array | string };
+
 /**
  * Write batch for atomic batch operations.
  */
@@ -178,12 +204,15 @@ export class LevelDBWriteBatch {
    * @returns this (for chaining)
    */
   clear(): this;
+
+  /** Release the native write-batch allocation. Safe to call more than once. */
+  free(): void;
 }
 
 /**
  * Iterator for traversing database entries.
  */
-export class LevelDBIteratorBase {
+export interface LevelDBIteratorBase {
   /**
    * An iterator is either positioned at a key/value pair, or not valid.
    *
@@ -236,9 +265,7 @@ export class LevelDBIteratorBase {
   prev(): void;
 
   /**
-   * Return the key for the current entry.
-   * The underlying storage for the returned slice is valid only until
-   * the next modification of the iterator.
+   * Return a copy of the key for the current entry.
    *
    * REQUIRES: valid()
    * @returns The key as Uint8Array, or undefined if not valid
@@ -246,9 +273,7 @@ export class LevelDBIteratorBase {
   key(): Uint8Array | undefined;
 
   /**
-   * Return the value for the current entry.
-   * The underlying storage for the returned slice is valid only until
-   * the next modification of the iterator.
+   * Return a copy of the value for the current entry.
    *
    * REQUIRES: valid()
    * @returns The value as Uint8Array, or undefined if not valid
@@ -266,24 +291,27 @@ export class LevelDBIteratorBase {
 /**
  * JavaScript iterator for key-value pairs.
  */
-export class LevelDBIterator implements Iterator<[Uint8Array, Uint8Array]> {
+export interface LevelDBIterator extends Iterator<[Uint8Array, Uint8Array]> {
   next(): IteratorResult<[Uint8Array, Uint8Array]>;
+  return(): IteratorResult<[Uint8Array, Uint8Array]>;
   [Symbol.iterator](): this;
 }
 
 /**
  * JavaScript iterator for keys only.
  */
-export class LevelDBKeyIterator implements Iterator<Uint8Array> {
+export interface LevelDBKeyIterator extends Iterator<Uint8Array> {
   next(): IteratorResult<Uint8Array>;
+  return(): IteratorResult<Uint8Array>;
   [Symbol.iterator](): this;
 }
 
 /**
  * JavaScript iterator for values only.
  */
-export class LevelDBValueIterator implements Iterator<Uint8Array> {
+export interface LevelDBValueIterator extends Iterator<Uint8Array> {
   next(): IteratorResult<Uint8Array>;
+  return(): IteratorResult<Uint8Array>;
   [Symbol.iterator](): this;
 }
 
@@ -296,6 +324,7 @@ export class LevelDB {
    */
   static readonly COMPRESSIONS: {
     readonly NONE: 0;
+    /** File-format ID only; the bundled build rejects SNAPPY for writes. */
     readonly SNAPPY: 1;
     readonly ZLIB: 2;
     readonly ZLIB_RAW: 4;
@@ -307,7 +336,10 @@ export class LevelDB {
    *
    * @returns Promise that resolves to true when initialized
    */
-  static initialize(): Promise<true>;
+  static initialize(options?: LevelDBInitializationOptions): Promise<true>;
+
+  /** The selected profile after initialization, otherwise null. */
+  static readonly memoryProfile: 'performance' | 'scalable' | null;
 
   /**
    * Destroy the contents of the specified database.
@@ -393,7 +425,7 @@ export class LevelDB {
    * @param operations - Array of operations
    * @returns A new write batch
    */
-  batch(operations?: Array<{type: 'put' | 'del', key: Uint8Array | string, value?: Uint8Array | string}>): LevelDBWriteBatch;
+  batch(operations?: LevelDBBatchOperation[]): LevelDBWriteBatch;
 
   /**
    * If the database contains an entry for "key", return the value.
@@ -416,7 +448,7 @@ export class LevelDB {
    * @param startKey - Start of the key range (inclusive)
    * @param limitKey - End of the key range (exclusive)
    */
-  compact(startKey: Uint8Array | string, limitKey: Uint8Array | string): void;
+  compact(startKey?: Uint8Array | string | null, limitKey?: Uint8Array | string | null): void;
 
   /**
    * Get database property value.
@@ -471,3 +503,4 @@ export class LevelDB {
    */
   values(): LevelDBValueIterator;
 }
+

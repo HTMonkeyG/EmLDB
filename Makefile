@@ -1,4 +1,5 @@
-MAKEFLAGS += -s -j
+MAKEFLAGS += -s -j4
+.DEFAULT_GOAL := all
 
 DIST_DIR = ./dist
 SRC_DIR = ./deps/leveldb-mcpe
@@ -8,27 +9,27 @@ CC = emcc
 
 SRC_DIRS = ./src $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
 
-CFLAGS = -std=c++11 -O3 -pthread
-CFLAGS += -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include -I./src
+CFLAGS = -std=c++11 -O3 -flto -pthread -fexceptions -DNDEBUG -MMD -MP -s USE_ZLIB=1
+# Keep the tracked Emscripten port shim ahead of the submodule so a clean
+# checkout does not depend on local edits inside deps/leveldb-mcpe.
+CFLAGS += -I./src -I./deps/leveldb-mcpe -I./deps/leveldb-mcpe/include
 CFLAGS += -DDLLX= -DLEVELDB_PLATFORM_EMSCRIPTEN
 CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
-CFLAGS += -g
 
-LFLAGS = -lm -flto --bind -msimd128 # -lnoderawfs.js -lnodefs.js
-LFLAGS += -s USE_ZLIB=1\
-	-s INITIAL_MEMORY=128MB\
-	-s TOTAL_STACK=32MB\
-	-s SINGLE_FILE=1\
+LFLAGS_COMMON = -lm -flto --bind -msimd128 -fexceptions
+LFLAGS_COMMON += -s USE_ZLIB=1\
+	-s TOTAL_STACK=4MB\
 	-s WASM=1\
 	-s MODULARIZE=1\
 	-s EXPORT_NAME='LevelDB'\
 	-s INVOKE_RUN=0\
-	-s EXPORTED_RUNTIME_METHODS=FS\
-	-s FORCE_FILESYSTEM=1\
-	-s NODERAWFS=1\
-	-s WASMFS=0\
-	-s ALLOW_MEMORY_GROWTH=1\
-	-s PTHREAD_POOL_SIZE=1
+	-s ENVIRONMENT=node\
+	-s PTHREAD_POOL_SIZE=2
+
+# The default artifact uses a fixed heap for predictable pthread performance.
+# The growth artifact trades some peak performance for a 2GB ceiling.
+LFLAGS_FIXED = $(LFLAGS_COMMON) -s INITIAL_MEMORY=128MB -s ALLOW_MEMORY_GROWTH=0
+LFLAGS_GROWTH = $(LFLAGS_COMMON) -s INITIAL_MEMORY=32MB -s MAXIMUM_MEMORY=2GB -s ALLOW_MEMORY_GROWTH=1 -Wno-pthreads-mem-growth
 
 CPP_SRC = emldb_utils.cc\
 	emldb.cc\
@@ -72,23 +73,35 @@ CPP_SRC = emldb_utils.cc\
 	port/port_emscripten.cc\
 	env_emscripten.cc
 CPP_OBJ = $(addprefix $(DIST_DIR)/, $(notdir $(CPP_SRC:.cc=.o)))
+DEP_FILES = $(CPP_OBJ:.o=.d)
 
-TARGET = libleveldb.js
-BIN_TARGET = $(DIST_DIR)/$(TARGET)
+FIXED_TARGET = $(DIST_DIR)/libleveldb.js
+GROWTH_TARGET = $(DIST_DIR)/libleveldb-growth.js
 
 vpath %.cc . $(SRC_DIRS)
 
-$(BIN_TARGET): $(CPP_OBJ)
-	@echo Linking ...
-	@$(CXX) --std=c++11 $(CFLAGS) $^ -o $@ $(LFLAGS)
+all: $(FIXED_TARGET) $(GROWTH_TARGET)
+
+$(FIXED_TARGET): $(CPP_OBJ)
+	@echo Linking performance profile ...
+	@$(CXX) --std=c++11 $(CFLAGS) $^ -o $@ $(LFLAGS_FIXED)
 	@echo Done.
 
-$(DIST_DIR)/%.o: %.cc
+$(GROWTH_TARGET): $(CPP_OBJ)
+	@echo Linking scalable profile ...
+	@$(CXX) --std=c++11 $(CFLAGS) $^ -o $@ $(LFLAGS_GROWTH)
+	@echo Done.
+
+$(DIST_DIR)/%.o: %.cc | $(DIST_DIR)
 	@echo Compiling file "$<" ...
 	@$(CXX) $(CFLAGS) -c $< -o $@
 
+$(DIST_DIR):
+	@mkdir $(DIST_DIR)
+
 clean:
-	-@del dist\*.js
-	-@del dist\*.wasm
-	-@del dist\*.a
-	-@del dist\*.o
+	@node -e "const fs=require('fs'),path=require('path'),dir='$(DIST_DIR)';if(fs.existsSync(dir))for(const file of fs.readdirSync(dir))if(['.js','.wasm','.a','.o','.d'].includes(path.extname(file)))fs.rmSync(path.join(dir,file))"
+
+-include $(DEP_FILES)
+
+.PHONY: all clean
