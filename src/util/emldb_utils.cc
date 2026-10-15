@@ -1,14 +1,15 @@
-#include "emldb_utils.h"
+#include <emscripten.h>
 #include <emscripten/bind.h>
+#include "emldb_utils.h"
 
 // Convert JavaScript Uint8Array to std::string for binary data transfer.
 std::string jsArrayToString(const emscripten::val &arr) {
   const size_t length = arr["byteLength"].as<size_t>();
   std::string str(length, '\0');
   if (length != 0) {
-    emscripten::val destination = emscripten::val(
-      emscripten::typed_memory_view(length,
-        reinterpret_cast<uint8_t *>(&str[0])));
+    emscripten::val destination = emscripten::val(emscripten::typed_memory_view(
+      length, reinterpret_cast<u08 *>(&str[0])
+    ));
     destination.call<void>("set", arr);
   }
   return str;
@@ -18,9 +19,9 @@ std::string jsArrayToString(const emscripten::val &arr) {
 emscripten::val stringToJsArray(const std::string &str) {
   emscripten::val arr = emscripten::val::global("Uint8Array").new_(str.size());
   if (!str.empty()) {
-    emscripten::val source = emscripten::val(
-      emscripten::typed_memory_view(str.size(),
-        reinterpret_cast<const uint8_t *>(str.data())));
+    emscripten::val source = emscripten::val(emscripten::typed_memory_view(str.size(),
+      reinterpret_cast<const u08 *>(str.data())
+    ));
     arr.call<void>("set", source);
   }
   return arr;
