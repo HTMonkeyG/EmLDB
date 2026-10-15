@@ -58,6 +58,46 @@ main().catch(console.error);
 Keys and values accept strings or `Uint8Array`. Strings are encoded as UTF-8;
 reads always return `Uint8Array`.
 
+## Performance tuning
+
+EmLDB ships LevelDB's upstream option defaults. For the small-key / small-value
+workloads of Minecraft Bedrock worlds and other embedded databases, those defaults
+under-perform on this binding. The two levers worth setting:
+
+- `writeBufferSize` (default 256 KiB). LevelDB flushes its in-memory memtable to
+  an SST file on every flush, and each write of one record currently crosses the
+  wasm/JS boundary and does a synchronous `fs.writeSync` per call. A larger
+  memtable batches far more keys per flush and per fsync, and on the
+  `--benchmarks=fillseq` db_bench port that moves fillseq from ~5 µs/op to
+  ~2.9 µs/op (1.7×) with 100-byte values. On the fixed 128 MB `performance`
+  heap, `16 * 1024 * 1024` is the knee of the curve for ~100K-key databases;
+  going to 64 MB does not help because the data set fits with headroom.
+- `blockSize` (default 4 KiB, already LevelDB's default). 4096 matches the
+  Minecraft region file page size and is a safe all-rounder; leave it alone
+  unless you have long values.
+- `bloomFilterBits` (default unset). A 10-bit filter only pays off when the key
+  universe and working set are large enough that the block cache does not hold
+  the index and filter blocks, so for typical small worlds it is neutral-to-slightly
+  slower and is left off in the example above.
+
+```js
+const db = new LevelDB("./db", {
+  createIfMissing: true,
+  compression: LevelDB.COMPRESSIONS.ZLIB_RAW,
+  writeBufferSize: 16 << 20,   // 16 MB memtable
+  blockSize: 4096,
+});
+```
+
+The write path is also controlled by `LevelDB.initialize({ fileWriteBuffer })`
+(default `65536` bytes). A larger value means fewer `fs.writeSync` calls per
+put; set it to `0` to flush every write, which is slower but keeps an
+acknowledged `put` durable across a process crash.
+
+Warm up the block cache with a full sequential scan (`for...of`) before timing
+random reads — `readseq` followed by `readrandom` shows ~1.6× higher random
+read throughput than cold.
+
 ## Memory profiles
 
 - `performance` is the default. It uses a fixed 128MB Wasm heap and avoids the

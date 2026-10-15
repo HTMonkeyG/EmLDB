@@ -771,7 +771,7 @@ class Benchmark {
 
 function parseFlags(argv) {
   const leveldbDefaults = {
-    write_buffer_size: 4 << 20,
+    write_buffer_size: 16 << 20,
     max_file_size: 2 << 20,
     block_size: 4096,
     open_files: 1000,
