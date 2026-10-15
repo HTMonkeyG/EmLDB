@@ -32,6 +32,12 @@ EM_JS(emscripten::EM_VAL, emJsCopyOut, (const uint8_t *src, size_t n), {
   return Emval.toHandle(HEAPU8.slice(src, src + n));
 });
 
+// subarray() aliases the wasm heap: no allocation, no copy. The result is only
+// meaningful until the caller's next operation on the owning object.
+EM_JS(emscripten::EM_VAL, emJsViewRaw, (const uint8_t *src, size_t n), {
+  return Emval.toHandle(HEAPU8.subarray(src, src + n));
+});
+
 // Convert JavaScript Uint8Array to std::string for binary data transfer.
 std::string jsArrayToString(const emscripten::val &arr) {
   // Covers every key and the great majority of values, so the common path
@@ -47,13 +53,19 @@ std::string jsArrayToString(const emscripten::val &arr) {
   return str;
 }
 
-// Convert std::string to JavaScript Uint8Array.
+// Copy std::string to a JavaScript Uint8Array (owned copy).
 emscripten::val stringToJsArray(const std::string &str) {
   if (str.empty()) {
     return emscripten::val::global("Uint8Array").new_(static_cast<size_t>(0));
   }
   return emscripten::val::take_ownership(emJsCopyOut(
     reinterpret_cast<const uint8_t *>(str.data()), str.size()));
+}
+
+// Zero-copy view over wasm memory; the caller must not outlive the buffer.
+emscripten::val emJsView(const char *data, size_t size) {
+  return emscripten::val::take_ownership(
+    emJsViewRaw(reinterpret_cast<const uint8_t *>(data), size));
 }
 
 // Throw the error from the JavaScript side so it stays an Error object. See the

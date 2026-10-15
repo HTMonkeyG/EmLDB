@@ -129,6 +129,10 @@ public:
     if (interval <= 0) throwJsError("block restart interval must be positive");
     m_options.block_restart_interval = interval;
   }
+  void setMaxFileSize(size_t size) {
+    if (size == 0) throwJsError("max file size must be positive");
+    m_options.max_file_size = size;
+  }
   void setNoCompression() { m_installCompressors(m_none.get()); }
   void setZlibCompression(int level) {
     m_validateCompressionLevel(level);
@@ -139,6 +143,11 @@ public:
     m_validateCompressionLevel(level);
     m_zlibRaw = emldb::make_unique<ZlibCompressorRaw>(level);
     m_installCompressors(m_zlibRaw.get());
+  }
+  // ZSTD is compiled only with -DZSTD (requires libzstd port); kept as a stub
+  // so the JS API can advertise it without a runtime cost.
+  void setZstdCompression(int /*level*/) {
+    throwJsError("ZSTD compression is not enabled in this build (rebuild with -DZSTD)");
   }
   void setComparator(val jsFunc, const std::string &name) { m_comparator = emldb::make_unique<JSComparator>(jsFunc, name); m_options.comparator = m_comparator.get(); }
   void setCache(size_t capacity) {
@@ -244,6 +253,14 @@ public:
   void next() { m_iter->Next(); }
   void prev() { m_iter->Prev(); }
 
+  // Size-only accessors. db_bench's readseq/readreverse accumulate
+  // key.size()+value.size() and never touch the bytes, so returning the length
+  // as an integer lets the JS side run the same loop the C++ side runs. Going
+  // through key()/value() would copy every record across the boundary just to
+  // read a property off the resulting object.
+  uint32_t keySize() const { return m_iter->Valid() ? static_cast<uint32_t>(m_iter->key().size()) : 0; }
+  uint32_t valueSize() const { return m_iter->Valid() ? static_cast<uint32_t>(m_iter->value().size()) : 0; }
+
   val key() const {
     if (!m_iter->Valid()) {
       return val::undefined();
@@ -258,6 +275,24 @@ public:
     }
     Slice v = m_iter->value();
     return stringToJsArray(std::string(v.data(), v.size()));
+  }
+
+  // Zero-copy views. HEAPU8.subarray() aliases the wasm heap instead of
+  // allocating, which is what makes a sequential scan O(1) allocations instead
+  // of one per record. The returned view is only valid until the next iterator
+  // mutation (next/prev/seek), because that is when the underlying block or
+  // memtable node can be released or the heap can move; this is the same
+  // contract as leveldb's Slice.
+  val keyView() const {
+    if (!m_iter->Valid()) return val::undefined();
+    Slice k = m_iter->key();
+    return emJsView(k.data(), k.size());
+  }
+
+  val valueView() const {
+    if (!m_iter->Valid()) return val::undefined();
+    Slice v = m_iter->value();
+    return emJsView(v.data(), v.size());
   }
 
 private:
@@ -362,6 +397,29 @@ public:
     return stringToJsArray(value_str);
   }
 
+  // Zero-copy variant: the value is read into this wrapper's scratch buffer and
+  // returned as a view over it, so consecutive getView calls reuse one
+  // allocation instead of one per read. The view is invalidated by the next
+  // getView (or any other read) on this DB.
+  val getView(const val &key, ReadOptionsWrapper &options) {
+    if (!m_db) {
+      throwJsError("Database is not open");
+    }
+
+    std::string key_str = jsArrayToString(key);
+    m_scratch.clear();
+
+    Status status = m_db->Get(options.get(), key_str, &m_scratch);
+    if (status.IsNotFound()) {
+      return val::undefined();
+    }
+    if (!status.ok()) {
+      throwJsError(status.ToString());
+    }
+
+    return emJsView(m_scratch.data(), m_scratch.size());
+  }
+
   void del(const val &key, WriteOptionsWrapper &options) {
     if (!m_db) {
       throwJsError("Database is not open");
@@ -435,6 +493,9 @@ public:
 private:
   std::unique_ptr<DB> m_db;
   std::string m_path = "";
+  // Backing store for getView(); reused across calls so a scan does not
+  // allocate per read.
+  std::string m_scratch = {};
 };
 
 }  // namespace leveldb
@@ -462,9 +523,11 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("setMaxOpenFiles", &OptionsWrapper::setMaxOpenFiles)
     .function("setBlockSize", &OptionsWrapper::setBlockSize)
     .function("setBlockRestartInterval", &OptionsWrapper::setBlockRestartInterval)
+    .function("setMaxFileSize", &OptionsWrapper::setMaxFileSize)
     .function("setNoCompression", &OptionsWrapper::setNoCompression)
     .function("setZlibCompression", &OptionsWrapper::setZlibCompression)
     .function("setZlibRawCompression", &OptionsWrapper::setZlibRawCompression)
+    .function("setZstdCompression", &OptionsWrapper::setZstdCompression)
     .function("setComparator", &OptionsWrapper::setComparator)
     .function("setCache", &OptionsWrapper::setCache)
     .function("setBloomFilter", &OptionsWrapper::setBloomFilter);
@@ -488,6 +551,10 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("prev", &IteratorWrapper::prev)
     .function("key", &IteratorWrapper::key)
     .function("value", &IteratorWrapper::value)
+    .function("keySize", &IteratorWrapper::keySize)
+    .function("valueSize", &IteratorWrapper::valueSize)
+    .function("keyView", &IteratorWrapper::keyView)
+    .function("valueView", &IteratorWrapper::valueView)
     .function("getError", &IteratorWrapper::getError);
 
   // WriteBatch
@@ -504,6 +571,7 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("close", &LevelDBWrapper::close)
     .function("put", &LevelDBWrapper::put)
     .function("get", &LevelDBWrapper::get)
+    .function("getView", &LevelDBWrapper::getView)
     .function("del", &LevelDBWrapper::del)
     .function("write", &LevelDBWrapper::write)
     .function("createIterator", &LevelDBWrapper::createIterator, allow_raw_pointers())

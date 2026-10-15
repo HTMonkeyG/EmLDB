@@ -38,8 +38,12 @@ namespace emldb {
 // Convert JavaScript Uint8Array to std::string for binary data transfer.
 std::string jsArrayToString(const emscripten::val &arr);
 
-// Convert std::string to JavaScript Uint8Array.
+// Convert std::string to JavaScript Uint8Array (copy).
 emscripten::val stringToJsArray(const std::string &str);
+
+// Zero-copy Uint8Array aliasing the wasm heap at [data, data+size).
+// Only valid until the owner's next mutation; see the EM_JS definition.
+emscripten::val emJsView(const char *data, size_t size);
 
 // Raise a JavaScript Error carrying `message`.
 //

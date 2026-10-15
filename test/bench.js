@@ -15,7 +15,7 @@
 //   * default --num    - db_bench defaults to 1000000; wasm is roughly an order
 //                        of magnitude slower, so the default here is 100000.
 //                        Pass --num=1000000 for the original workload.
-//   * no --max_file_size - EmLDB exposes no option for it.
+//   * --max_file_size - EmLDB exposes it, so it is passed through.
 //   * CPU-only benchmarks of db_bench (crc32c, snappycomp, snappyuncomp,
 //     acquireload, heapprofile) are omitted: they measure leveldb's C++
 //     helpers, not this binding.
@@ -26,6 +26,10 @@
 
 const path = require('path');
 const { LevelDB } = require('../main.js');
+
+// Reused for key encoding; TextEncoder is stateless and constructing one per
+// call is measurable at these op counts.
+const TEXT_ENCODER = new TextEncoder();
 
 // EmLDB raises JavaScript Errors, so e.message carries the real diagnostic.
 // The fallback still matters: never swallow a failure, because a swallowed
@@ -398,13 +402,13 @@ class Benchmark {
     const f = this.flags;
     const options = { createIfMissing: !f.use_existing_db };
 
-    // Only pass what EmLDB actually exposes; db_bench's --max_file_size has no
-    // equivalent and is reported as unsupported at parse time.
+    // Only pass what EmLDB actually exposes.
     if (f.write_buffer_size) options.writeBufferSize = f.write_buffer_size;
     if (f.block_size) options.blockSize = f.block_size;
     if (f.cache_size >= 0) options.cacheSize = f.cache_size;
     if (f.bloom_bits >= 0) options.bloomFilterBits = f.bloom_bits;
     if (f.open_files) options.maxOpenFiles = f.open_files;
+    if (f.max_file_size) options.maxFileSize = f.max_file_size;
     options.compression = f.compression_id;
     if (f.compression_level !== -1) options.compressionLevel = f.compression_level;
 
@@ -478,13 +482,18 @@ class Benchmark {
 
   // ---- read ----------------------------------------------------------------
 
+  // db_bench.cc ReadSequential accumulates key.size()+value.size() and never
+  // touches the bytes, so this uses the length-only accessors. Calling key()/
+  // value() would copy every record across the wasm boundary just to read
+  // .length off the result, which measures a different (and much heavier) loop
+  // than the C++ benchmark does.
   readSequential(thread) {
     const iter = this.db.iterator(this.readOptions);
     let i = 0;
     let bytes = 0;
     try {
       for (iter.seekToFirst(); i < this.reads && iter.valid(); iter.next()) {
-        bytes += iter.key().length + iter.value().length;
+        bytes += iter.keySize() + iter.valueSize();
         thread.stats.finishedSingleOp();
         i++;
       }
@@ -503,7 +512,7 @@ class Benchmark {
     let bytes = 0;
     try {
       for (iter.seekToLast(); i < this.reads && iter.valid(); iter.prev()) {
-        bytes += iter.key().length + iter.value().length;
+        bytes += iter.keySize() + iter.valueSize();
         thread.stats.finishedSingleOp();
         i++;
       }
@@ -519,20 +528,42 @@ class Benchmark {
   // db_bench counts a read as found when Get() returns ok. EmLDB returns
   // undefined for NotFound and throws for a real failure, so only undefined
   // counts as missing.
+  // db_bench's ReadRandom calls db_->Get(opts, key, &value) with a single
+  // reused std::string, so its buffer is allocated once and overwritten per
+  // read. getView() matches that: one reusable buffer, no per-read allocation.
+  // Reading the bytes is required here (unlike readseq), so use them or the
+  // loop could be optimized away.
   getKey(key) {
     let value;
     try {
-      value = this.db.get(key, this.readOptions);
+      value = this.db.getView(key, this.readOptions);
     } catch (e) {
       die('get error', e);
     }
     return value;
   }
 
+  // db_bench's ReadRandom formats the key into a stack buffer with
+  // snprintf("%016d") - no heap allocation per read - and passes it to Get as a
+  // Slice. The JS equivalent is a precomputed pool of encoded keys: building a
+  // string plus UTF-8 encoding one per read costs more than the lookup itself.
+  keyPool() {
+    if (this._keyPool) return this._keyPool;
+    const n = this.flags.num;
+    const pool = new Array(n);
+    for (let i = 0; i < n; i++) {
+      pool[i] = TEXT_ENCODER.encode(String(i).padStart(16, '0'));
+    }
+    this._keyPool = pool;
+    return pool;
+  }
+
   readRandom(thread) {
+    const pool = this.keyPool();
+    const n = this.flags.num;
     let found = 0;
     for (let i = 0; i < this.reads; i++) {
-      const key = String(thread.rand.next() % this.flags.num).padStart(16, '0');
+      const key = pool[thread.rand.next() % n];
       if (this.getKey(key) !== undefined) found++;
       thread.stats.finishedSingleOp();
     }
@@ -771,7 +802,7 @@ class Benchmark {
 
 function parseFlags(argv) {
   const leveldbDefaults = {
-    write_buffer_size: 16 << 20,
+    write_buffer_size: 8 << 20,
     max_file_size: 2 << 20,
     block_size: 4096,
     open_files: 1000,
@@ -790,7 +821,7 @@ function parseFlags(argv) {
     use_existing_db: false,
     db: path.join(__dirname, 'benchmark_db'),
     ...leveldbDefaults,
-    cache_size: -1,
+    cache_size: 8 << 20,
     bloom_bits: -1,
     batch_size: 1,
     memory_profile: 'performance',
@@ -806,6 +837,7 @@ function parseFlags(argv) {
     '--key_size': 'key_size',
     '--compression_ratio': 'compression_ratio',
     '--write_buffer_size': 'write_buffer_size',
+    '--max_file_size': 'max_file_size',
     '--block_size': 'block_size',
     '--cache_size': 'cache_size',
     '--bloom_bits': 'bloom_bits',
@@ -858,10 +890,6 @@ function parseFlags(argv) {
     }
     if (matched) continue;
 
-    if (arg.startsWith('--max_file_size=')) {
-      process.stderr.write('note: --max_file_size is not exposed by EmLDB, ignoring\n');
-      continue;
-    }
     if (arg.startsWith('--threads=')) {
       process.stderr.write('note: EmLDB\'s API is single threaded, --threads ignored\n');
       continue;
@@ -906,6 +934,7 @@ Usage: node bench.js [flags]
   --histogram=0|1          Print the per op latency histogram
   --use_existing_db=0|1    Do not destroy the db for fresh_db benchmarks
   --write_buffer_size=<n>  Passed to EmLDB
+  --max_file_size=<n>      Passed to EmLDB (default 2MB)
   --block_size=<n>         Passed to EmLDB
   --cache_size=<n>         Passed to EmLDB, negative uses its default
   --bloom_bits=<n>         Passed to EmLDB, negative uses its default

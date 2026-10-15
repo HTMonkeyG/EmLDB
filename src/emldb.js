@@ -128,6 +128,10 @@ class LevelDBOptions {
       assertInteger(options.blockRestartInterval, "blockRestartInterval", 1, 0x7fffffff);
       this.opt.setBlockRestartInterval(options.blockRestartInterval);
     }
+    if (options.maxFileSize != null) {
+      assertInteger(options.maxFileSize, "maxFileSize", 1, 0xffffffff);
+      this.opt.setMaxFileSize(options.maxFileSize);
+    }
     if (options.cacheSize != null) {
       assertInteger(options.cacheSize, "cacheSize", 0, 0xffffffff);
       if (options.cacheSize > 0)
@@ -154,6 +158,9 @@ class LevelDBOptions {
           break;
         case LevelDB.COMPRESSIONS.ZLIB_RAW:
           this.opt.setZlibRawCompression(level);
+          break;
+        case LevelDB.COMPRESSIONS.ZSTD:
+          this.opt.setZstdCompression(level);
           break;
         case LevelDB.COMPRESSIONS.SNAPPY:
           throw new Error("SNAPPY compression is not included in this build");
@@ -404,6 +411,31 @@ class LevelDBIteratorBase {
     return this.iter.value();
   }
 
+  // Length-only accessors: no bytes cross the boundary.
+  keySize() {
+    this.validate();
+    return this.iter.keySize();
+  }
+
+  valueSize() {
+    this.validate();
+    return this.iter.valueSize();
+  }
+
+  // Zero-copy views over the wasm heap. The returned Uint8Array is only valid
+  // until the next call that moves this iterator (next/prev/seek). Copy it
+  // (e.g. Uint8Array.from) if you need to keep it, or use key()/value() which
+  // return owned copies.
+  keyView() {
+    this.validate();
+    return this.iter.keyView();
+  }
+
+  valueView() {
+    this.validate();
+    return this.iter.valueView();
+  }
+
   getError() {
     this.validate();
     var err = this.iter.getError();
@@ -505,6 +537,7 @@ class LevelDB {
     NONE: 0,
     SNAPPY: 1,
     ZLIB: 2,
+    ZSTD: 3,
     ZLIB_RAW: 4
   };
 
@@ -756,6 +789,22 @@ class LevelDB {
 
     try {
       return this.db.get(key, ropt.get());
+    } finally {
+      if (ropt != this.defaultReadOpt) ropt.free();
+    }
+  }
+
+  // Zero-copy read: the returned Uint8Array aliases a buffer reused by this DB,
+  // so it is invalidated by the next getView() call. Use get() for an owned
+  // copy. This is what makes a random-read loop allocation-free.
+  getView(key, options) {
+    this.validate();
+
+    key = toUint8Array(key);
+    var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
+
+    try {
+      return this.db.getView(key, ropt.get());
     } finally {
       if (ropt != this.defaultReadOpt) ropt.free();
     }

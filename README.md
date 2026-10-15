@@ -64,14 +64,21 @@ EmLDB ships LevelDB's upstream option defaults. For the small-key / small-value
 workloads of Minecraft Bedrock worlds and other embedded databases, those defaults
 under-perform on this binding. The two levers worth setting:
 
-- `writeBufferSize` (default 256 KiB). LevelDB flushes its in-memory memtable to
-  an SST file on every flush, and each write of one record currently crosses the
-  wasm/JS boundary and does a synchronous `fs.writeSync` per call. A larger
-  memtable batches far more keys per flush and per fsync, and on the
-  `--benchmarks=fillseq` db_bench port that moves fillseq from ~5 µs/op to
-  ~2.9 µs/op (1.7×) with 100-byte values. On the fixed 128 MB `performance`
-  heap, `16 * 1024 * 1024` is the knee of the curve for ~100K-key databases;
-  going to 64 MB does not help because the data set fits with headroom.
+- `writeBufferSize` (default 256 KiB upstream; `test/bench.js` uses `8 << 20`).
+  LevelDB flushes its in-memory memtable to an SST file on every flush, and
+  each write of one record crosses the wasm/JS boundary and does a synchronous
+  `fs.writeSync`. A larger memtable batches far more keys per flush and per
+  fsync, and on the `--benchmarks=fillseq` db_bench port that moves fillseq
+  from ~5 µs/op to ~2.9 µs/op (1.7×) with 100-byte values. `16 << 20` is the
+  `fillseq` knee for ~100K-key databases and also the `write-heavy` recommendation;
+  bench.js uses `8 << 20` as the **balanced** default because `16 << 20` merges
+  the LSM into one 5.7 MB L2 SST, making the post-fill `readseq` regress by
+  ~0.6 µs/op (single large-block decompression vs. 3 small SSTs; `readseq` after
+  `compact` converges). If you stay `read-heavy`, pin `writeBufferSize: 4 << 20`
+  or combine `16 << 20` with `maxFileSize: 2 << 20` to keep SSTs small.
+- `maxFileSize` (default 2 MiB). Upper bound for an SST file. Exposed as
+  `new LevelDB(path, { maxFileSize: 2<<20 })`; use it with a large `writeBufferSize`
+  to keep sequential scans fast without sacrificing fill throughput.
 - `blockSize` (default 4 KiB, already LevelDB's default). 4096 matches the
   Minecraft region file page size and is a safe all-rounder; leave it alone
   unless you have long values.
@@ -84,7 +91,8 @@ under-perform on this binding. The two levers worth setting:
 const db = new LevelDB("./db", {
   createIfMissing: true,
   compression: LevelDB.COMPRESSIONS.ZLIB_RAW,
-  writeBufferSize: 16 << 20,   // 16 MB memtable
+  writeBufferSize: 8 << 20,    // balanced default; 16<<20 for write-heavy
+  maxFileSize: 2 << 20,        // keep SSTs small when writeBufferSize is large
   blockSize: 4096,
 });
 ```
