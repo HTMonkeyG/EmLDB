@@ -36,6 +36,27 @@ thread_local emscripten::val* tls_fs = nullptr;
 // Global flag to track if fs has been initialized
 static std::atomic<bool> g_fs_initialized(false);
 
+// How many bytes EmWritableFile accumulates before handing them to Node.
+//
+// LevelDB writes each log record as two Appends - a 7 byte header and the
+// payload - and each table block as two more, the contents and its trailer.
+// One fs.writeSync per Append costs roughly 3us, which dominated fillseq and
+// made single puts four times slower than batched ones. Buffering merges them
+// into one write per threshold (or per Flush, see EmWritableFile::Flush).
+//
+// The tradeoff is the unflushed tail: with buffering on, a crashed process
+// loses up to this many bytes of WAL, where upstream leveldb would only lose
+// them to a machine crash because the data already sits in the OS page cache.
+// Set 0 to opt out and keep the upstream guarantee exactly.
+const size_t kDefaultFileWriteBuffer = 64 * 1024;
+
+// A caller that never reaches Flush()/Sync()/Close() must not be able to grow
+// the buffer without bound. Only reachable with buffering on, since otherwise
+// Append never holds more than one record's worth of bytes.
+const size_t kMaxFileWriteBuffer = 4 * 1024 * 1024;
+
+static std::atomic<size_t> g_file_write_buffer(kDefaultFileWriteBuffer);
+
 // Helper structure for StartThread
 struct StartThreadState {
   void (*user_function)(void*);
@@ -44,6 +65,150 @@ struct StartThreadState {
 
 EM_JS(emscripten::EM_VAL, requireFS, (), {
   return Emval.toHandle(require("fs"));
+});
+
+// Creates the sidecar guard file that stands in for the flock() Node does not
+// expose, recovering it when the previous owner died without unlocking. A
+// killed test run or a crashed process used to leave the guard behind and
+// force a manual delete before the database could be reopened.
+//
+// Returns 0 on success, 1 on failure with a message written to errorOut. The
+// message is passed out rather than thrown because a JS exception raised
+// inside an EM_JS body has to unwind through wasm frames to reach a C++
+// catch, which is not something this file should depend on.
+EM_JS(int, emJsAcquireGuard, (const char *guardName, char *errorOut, size_t errorCap), {
+  var fs = require('fs');
+  var guard = UTF8ToString(guardName);
+  var host = require('os').hostname();
+  var owner = 'pid=' + process.pid + '\nhost=' + host +
+              '\ntime=' + new Date().toISOString() + '\n';
+
+  // A guard file appears before its owner text is written, so an ownerless one
+  // is usually a concurrent acquisition mid-write rather than a broken lock.
+  // Re-reading covers that in a few hundred microseconds; a writer that died
+  // inside the window leaves a guard nobody can ever take, which is the manual
+  // cleanup this recovery exists to remove, so the retries are bounded.
+  //
+  // The retries spin rather than sleep on purpose: the window being covered is
+  // microseconds wide, and a timer-based wait costs ~15ms per iteration on
+  // Windows regardless of the timeout asked for.
+  var OWNERLESS_SPINS = 200;
+  var MAX_ATTEMPTS = 400;
+
+  function create() {
+    var fd = fs.openSync(guard, 'wx');
+    try {
+      fs.writeSync(fd, Buffer.from(owner));
+      fs.closeSync(fd);
+    } catch (error) {
+      // Do not leave an ownerless guard behind if the write failed.
+      try { fs.closeSync(fd); } catch (ignored) { }
+      try { fs.unlinkSync(guard); } catch (ignored) { }
+      throw error;
+    }
+  }
+
+  function discard(reason) {
+    process.emitWarning('recovering lock ' + guard + ', ' + reason,
+      { code: 'EMLDB_STALE_LOCK' });
+    try {
+      fs.unlinkSync(guard);
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+
+  try {
+    for (var attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      try {
+        create();
+        return 0;
+      } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+      }
+
+      var raw;
+      try {
+        raw = fs.readFileSync(guard, 'utf8');
+      } catch (error) {
+        if (error.code === 'ENOENT') continue;  // released before we read it
+        throw error;
+      }
+
+      var pidMatch = raw.match(/^pid=([0-9]+)/m);
+      if (!pidMatch) {
+        if (attempt < OWNERLESS_SPINS) continue;
+        discard('which records no owner');
+        continue;
+      }
+
+      var pid = parseInt(pidMatch[1], 10);
+      // Guards written before this format recorded the host have only the pid
+      // line; treat those as local, which is what the code that wrote them
+      // assumed, so upgrading does not strand an existing lock.
+      var hostMatch = raw.match(/^host=(.*)/m);
+      var ownerHost = hostMatch ? hostMatch[1].trim() : host;
+
+      if (ownerHost !== host) {
+        stringToUTF8('database is locked by process ' + pid + ' on ' + ownerHost +
+          ', whose liveness cannot be checked from ' + host +
+          '; delete this file only once that process is known to be gone',
+          errorOut, errorCap);
+        return 1;
+      }
+
+      // Pids are unique among running processes, so our own pid on a guard the
+      // caller holds no in-process lock for means the previous owner is gone.
+      var live = pid !== process.pid;
+      if (live) {
+        try {
+          process.kill(pid, 0);
+        } catch (error) {
+          if (error.code === 'ESRCH') live = false;
+          else if (error.code !== 'EPERM') throw error;  // EPERM means it exists
+        }
+      }
+
+      if (live) {
+        stringToUTF8('database is locked by live process ' + pid + ' on ' + host +
+          '; close that database, or delete this file if that process is gone',
+          errorOut, errorCap);
+        return 1;
+      }
+
+      discard('left behind by process ' + pid + ' on ' + host +
+        ', which is no longer running');
+    }
+    stringToUTF8('gave up acquiring the database lock after ' + MAX_ATTEMPTS +
+      ' attempts', errorOut, errorCap);
+    return 1;
+  } catch (error) {
+    stringToUTF8(String((error && error.message) || error), errorOut, errorCap);
+    return 1;
+  }
+});
+
+// Removes the guard file, but only while it still names this process. A guard
+// another process recovered as stale belongs to that process now, and deleting
+// it would let two databases open on the same directory.
+//
+// Returns 0 on success, 1 on failure with a message written to errorOut.
+EM_JS(int, emJsReleaseGuard, (const char *guardName, int pid, char *errorOut, size_t errorCap), {
+  var fs = require('fs');
+  var guard = UTF8ToString(guardName);
+
+  try {
+    var raw = fs.readFileSync(guard, 'utf8');
+    var pidMatch = raw.match(/^pid=([0-9]+)/m);
+    if (pidMatch && parseInt(pidMatch[1], 10) !== pid) return 0;
+    fs.unlinkSync(guard);
+    return 0;
+  } catch (error) {
+    // Nothing left to release, or nothing that is still ours.
+    if (error.code === 'ENOENT') return 0;
+    stringToUTF8(String((error && error.message) || error), errorOut, errorCap);
+    return 1;
+  }
 });
 
 // Helper function to get or initialize the fs module for current thread
@@ -191,11 +356,21 @@ private:
   i32 m_fd;
 };
 
-// Writable file implementation using Node.js fs.open/write/close
+// Writable file implementation using Node.js fs.open/write/close.
+//
+// Appends land in an in-process buffer that is handed to Node in one
+// fs.writeSync per kDefaultFileWriteBuffer bytes rather than one per Append.
+// See the constants above for the cost and the durability tradeoff.
+//
+// Every writer owns its file, and LevelDB only ever touches one file from one
+// thread, so the buffer needs no locking; the threshold is read once at
+// construction from the atomic global.
 class EmWritableFile : public WritableFile {
 public:
   EmWritableFile(const std::string& path, i32 fd)
-      : m_path(path), m_fd(fd) {}
+      : m_path(path),
+        m_fd(fd),
+        m_threshold(g_file_write_buffer.load(std::memory_order_relaxed)) {}
 
   EmWritableFile(const EmWritableFile&) = delete;
   EmWritableFile& operator=(const EmWritableFile&) = delete;
@@ -203,6 +378,9 @@ public:
   virtual ~EmWritableFile() noexcept {
     if (m_fd != -1) {
       try {
+        // Best effort: a destructor cannot report a failure, but dropping the
+        // buffer would silently lose acknowledged writes.
+        FlushBuffer();
         emscripten::val fs = GetFS();
         fs.call<void>("closeSync", m_fd);
       } catch (...) { }
@@ -216,47 +394,57 @@ public:
       return Status::IOError(m_path, "file not open");
     }
 
-    try {
-      emscripten::val fs = GetFS();
-      size_t offset = 0;
-      while (offset < data.size()) {
-        const size_t remaining = data.size() - offset;
-        emscripten::val buffer = emscripten::val(
-          emscripten::typed_memory_view(remaining,
-            reinterpret_cast<const unsigned char*>(data.data() + offset)));
-        size_t bytesWritten = fs.call<size_t>("writeSync", m_fd, buffer);
-        if (bytesWritten == 0 || bytesWritten > remaining) {
-          return Status::IOError(m_path, "write made no progress");
-        }
-        offset += bytesWritten;
-      }
-      return Status::OK();
-    } catch (const emscripten::val& error) {
-      return FsError(m_path, "write", error);
+    m_buffer.append(data.data(), data.size());
+
+    if (m_buffer.size() >= kMaxFileWriteBuffer ||
+        (m_threshold != 0 && m_buffer.size() >= m_threshold)) {
+      return FlushBuffer();
     }
+    return Status::OK();
   }
 
   virtual Status Close() override {
-    if (m_fd != -1) {
-      try {
-        emscripten::val fs = GetFS();
-        fs.call<void>("closeSync", m_fd);
-        m_fd = -1;
-      } catch (const emscripten::val& error) {
-        return FsError(m_path, "close", error);
-      }
+    if (m_fd == -1) {
+      return Status::OK();
+    }
+
+    // A failed flush must not close the fd: the caller has to be able to retry,
+    // and a closed handle would make the lost bytes unrecoverable.
+    Status status = FlushBuffer();
+    if (!status.ok()) {
+      return status;
+    }
+
+    try {
+      emscripten::val fs = GetFS();
+      fs.call<void>("closeSync", m_fd);
+      m_fd = -1;
+    } catch (const emscripten::val& error) {
+      return FsError(m_path, "close", error);
     }
     return Status::OK();
   }
 
   virtual Status Flush() override {
-    // Node.js writeSync is synchronous, data is already flushed
+    // LevelDB calls this after every physical record, so flushing here would
+    // defeat the buffer entirely. With buffering disabled (threshold 0) it is
+    // the only thing that pushes a record out, which is what keeps that mode
+    // byte-for-byte identical to upstream: there each Append already reached
+    // the OS and Flush() was a no-op.
+    if (m_threshold == 0) {
+      return FlushBuffer();
+    }
     return Status::OK();
   }
 
   virtual Status Sync() override {
     if (m_fd == -1) {
       return Status::IOError(m_path, "file not open");
+    }
+
+    Status status = FlushBuffer();
+    if (!status.ok()) {
+      return status;
     }
 
     try {
@@ -269,16 +457,52 @@ public:
   }
 
 private:
+  // Writes the buffer out in one fs.writeSync, retrying on a short write. The
+  // already-written prefix is dropped on failure so a later retry cannot
+  // duplicate bytes into the log.
+  Status FlushBuffer() {
+    if (m_buffer.empty()) {
+      return Status::OK();
+    }
+    if (m_fd == -1) {
+      return Status::IOError(m_path, "file not open");
+    }
+
+    size_t offset = 0;
+    try {
+      emscripten::val fs = GetFS();
+      while (offset < m_buffer.size()) {
+        const size_t remaining = m_buffer.size() - offset;
+        emscripten::val buffer = emscripten::val(
+          emscripten::typed_memory_view(remaining,
+            reinterpret_cast<const unsigned char*>(m_buffer.data() + offset)));
+        size_t bytesWritten = fs.call<size_t>("writeSync", m_fd, buffer);
+        if (bytesWritten == 0 || bytesWritten > remaining) {
+          m_buffer.erase(0, offset);
+          return Status::IOError(m_path, "write made no progress");
+        }
+        offset += bytesWritten;
+      }
+    } catch (const emscripten::val& error) {
+      m_buffer.erase(0, offset);
+      return FsError(m_path, "write", error);
+    }
+
+    m_buffer.clear();
+    return Status::OK();
+  }
+
   std::string m_path;
   i32 m_fd;
+  size_t m_threshold;
+  std::string m_buffer;
 };
 
 // File lock backed by an atomically-created cross-process guard file.
 class EmFileLock : public FileLock {
 public:
-  i32 fd_;
-  std::string name_;
-  std::string guard_name_;
+  std::string name_;        // the LOCK path, used to drop the in-process entry
+  std::string guard_name_;  // the sidecar guard file this lock created
 };
 
 // Lock table to prevent multiple locks on same file
@@ -565,51 +789,33 @@ public:
       return Status::IOError("lock " + fname, "already held by process");
     }
 
-    // Node core does not expose flock. Use an atomically-created sidecar as a
-    // fail-safe cross-process guard. It is removed on clean unlock; after a
-    // crash it intentionally requires explicit operator recovery rather than
-    // guessing that another process's lock is stale.
+    // Node core does not expose flock, so the cross-process guard is a sidecar
+    // file created with O_EXCL. emJsAcquireGuard also clears a guard whose
+    // owner died without unlocking, so a killed process no longer leaves the
+    // database needing a manual delete before the next open.
     const std::string guardName = fname + ".emldb-lock";
-    i32 fdNum = -1;
-    try {
-      emscripten::val fs = GetFS();
-      fdNum = fs.call<i32>("openSync", guardName, std::string("wx"));
-      std::string owner = "pid=" + std::to_string(
-        emscripten::val::global("process")["pid"].as<i32>()) + "\n";
-      emscripten::val ownerBytes = emscripten::val::global("Buffer").call<emscripten::val>(
-        "from", owner);
-      fs.call<size_t>("writeSync", fdNum, ownerBytes);
-
-      EmFileLock* my_lock = new EmFileLock;
-      my_lock->fd_ = fdNum;
-      my_lock->name_ = fname;
-      my_lock->guard_name_ = guardName;
-      *lock = my_lock;
-      return Status::OK();
-    } catch (const emscripten::val& error) {
-      if (fdNum != -1) {
-        try {
-          emscripten::val fs = GetFS();
-          fs.call<void>("closeSync", fdNum);
-          if (fs.call<bool>("existsSync", guardName)) fs.call<void>("unlinkSync", guardName);
-        } catch (...) { }
-      }
+    char message[512] = {};
+    if (emJsAcquireGuard(guardName.c_str(), message, sizeof(message)) != 0) {
       m_locks.Remove(fname);
-      return FsError(guardName, "acquire database lock", error);
+      return Status::IOError(guardName, message);
     }
+
+    EmFileLock* my_lock = new EmFileLock;
+    my_lock->name_ = fname;
+    my_lock->guard_name_ = guardName;
+    *lock = my_lock;
+    return Status::OK();
   }
 
   virtual Status UnlockFile(FileLock* lock) override {
     EmFileLock* my_lock = reinterpret_cast<EmFileLock*>(lock);
     Status status = Status::OK();
-    if (my_lock->fd_ != -1 && HasFS()) {
-      try {
-        emscripten::val fs = GetFS();
-        fs.call<void>("closeSync", my_lock->fd_);
-        if (fs.call<bool>("existsSync", my_lock->guard_name_))
-          fs.call<void>("unlinkSync", my_lock->guard_name_);
-      } catch (const emscripten::val& error) {
-        status = FsError(my_lock->guard_name_, "release database lock", error);
+    if (HasFS()) {
+      const i32 pid = emscripten::val::global("process")["pid"].as<i32>();
+      char message[512] = {};
+      if (emJsReleaseGuard(my_lock->guard_name_.c_str(), pid,
+                           message, sizeof(message)) != 0) {
+        status = Status::IOError(my_lock->guard_name_, message);
       }
     }
     m_locks.Remove(my_lock->name_);
@@ -775,6 +981,16 @@ void SetFS(emscripten::val fs) {
 
   // If the default environment already exists, it will pick up the new fs through GetFS()
   // No need to recreate the environment
+}
+
+// Set the per-file write buffer size from JavaScript.
+//
+// This has to be a process-wide setting rather than an Options field because
+// NewWritableFile() is an Env method and never sees the options that opened the
+// DB. It is read once per EmWritableFile, so it must be set before any DB is
+// opened - LevelDB.initialize() is the only caller.
+void SetFileWriteBuffer(size_t bytes) {
+  g_file_write_buffer.store(bytes, std::memory_order_relaxed);
 }
 
 }  // namespace leveldb

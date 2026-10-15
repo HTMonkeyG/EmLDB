@@ -41,4 +41,12 @@ std::string jsArrayToString(const emscripten::val &arr);
 // Convert std::string to JavaScript Uint8Array.
 emscripten::val stringToJsArray(const std::string &str);
 
+// Raise a JavaScript Error carrying `message`.
+//
+// A C++ exception crossing the embind boundary reaches JavaScript as a bare
+// pointer, so `catch (e)` in JS sees a number and `e.message` is undefined -
+// every diagnostic this library produces would be unreadable. Raising the value
+// on the JavaScript side keeps the message intact.
+[[noreturn]] void throwJsError(const std::string &message);
+
 #endif

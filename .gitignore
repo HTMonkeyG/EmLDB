@@ -9,6 +9,9 @@ dist/
 # Test
 test/
 test*
+!test/
+test/*
+!test/bench.js
 *.cpuprofile
 *.cpuprofile.*
 

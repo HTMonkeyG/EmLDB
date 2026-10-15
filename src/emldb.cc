@@ -26,9 +26,10 @@ using namespace emscripten;
 
 namespace leveldb {
 
-// Forward declaration of SetFS function from env_emscripten.cc
+// Forward declaration of functions from env_emscripten.cc
 #if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
 void SetFS(emscripten::val fs);
+void SetFileWriteBuffer(size_t bytes);
 #endif
 
 // ----------------------------------------------------------------------------
@@ -49,6 +50,9 @@ public:
     val b_array = stringToJsArray(std::string(b.data(), b.size()));
     double result = m_jsCompare(a_array, b_array).as<double>();
     if (!std::isfinite(result)) {
+      // Stays a C++ exception: comparisons run on LevelDB's compaction worker,
+      // where there is no JavaScript to raise an Error on. Unreachable anyway,
+      // since the JS layer rejects comparators on the threaded build.
       throw std::runtime_error("Comparator must return a finite number");
     }
     return result < 0 ? -1 : (result > 0 ? 1 : 0);
@@ -110,19 +114,19 @@ public:
   void setErrorIfExists(bool value) { m_options.error_if_exists = value; }
   void setParanoidChecks(bool value) { m_options.paranoid_checks = value; }
   void setWriteBufferSize(size_t size) {
-    if (size == 0) throw std::invalid_argument("write buffer size must be positive");
+    if (size == 0) throwJsError("write buffer size must be positive");
     m_options.write_buffer_size = size;
   }
   void setMaxOpenFiles(int num) {
-    if (num <= 0) throw std::invalid_argument("max open files must be positive");
+    if (num <= 0) throwJsError("max open files must be positive");
     m_options.max_open_files = num;
   }
   void setBlockSize(size_t size) {
-    if (size == 0) throw std::invalid_argument("block size must be positive");
+    if (size == 0) throwJsError("block size must be positive");
     m_options.block_size = size;
   }
   void setBlockRestartInterval(int interval) {
-    if (interval <= 0) throw std::invalid_argument("block restart interval must be positive");
+    if (interval <= 0) throwJsError("block restart interval must be positive");
     m_options.block_restart_interval = interval;
   }
   void setNoCompression() { m_installCompressors(m_none.get()); }
@@ -138,12 +142,12 @@ public:
   }
   void setComparator(val jsFunc, const std::string &name) { m_comparator = emldb::make_unique<JSComparator>(jsFunc, name); m_options.comparator = m_comparator.get(); }
   void setCache(size_t capacity) {
-    if (capacity == 0) throw std::invalid_argument("cache capacity must be positive");
+    if (capacity == 0) throwJsError("cache capacity must be positive");
     m_cache.reset(NewLRUCache(capacity));
     m_options.block_cache = m_cache.get();
   }
   void setBloomFilter(int bitsPerKey) {
-    if (bitsPerKey <= 0) throw std::invalid_argument("bloom filter bits must be positive");
+    if (bitsPerKey <= 0) throwJsError("bloom filter bits must be positive");
     m_filterPolicy.reset(NewBloomFilterPolicy(bitsPerKey));
     m_options.filter_policy = m_filterPolicy.get();
   }
@@ -175,7 +179,7 @@ private:
 
   void m_validateCompressionLevel(int level) {
     if (level < -1 || level > 9) {
-      throw std::invalid_argument("compression level must be between -1 and 9");
+      throwJsError("compression level must be between -1 and 9");
     }
   }
 
@@ -290,14 +294,14 @@ public:
   static void destroy(const std::string &path, OptionsWrapper &options) {
     Status status = DestroyDB(path, options.get());
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
   }
 
   static void repair(const std::string &path, OptionsWrapper &options) {
     Status status = RepairDB(path, options.get());
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
   }
 
@@ -315,7 +319,7 @@ public:
     Status status = DB::Open(options.get(), path, &db);
 
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
 
     m_db.reset(db);
@@ -325,7 +329,7 @@ public:
 
   void put(const val &key, const val &value, WriteOptionsWrapper &options) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     std::string key_str = jsArrayToString(key);
@@ -333,13 +337,13 @@ public:
 
     Status status = m_db->Put(options.get(), key_str, value_str);
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
   }
 
   val get(const val &key, ReadOptionsWrapper &options) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     std::string key_str = jsArrayToString(key);
@@ -352,7 +356,7 @@ public:
     }
 
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
 
     return stringToJsArray(value_str);
@@ -360,31 +364,31 @@ public:
 
   void del(const val &key, WriteOptionsWrapper &options) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     std::string key_str = jsArrayToString(key);
 
     Status status = m_db->Delete(options.get(), key_str);
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
   }
 
   void write(WriteBatchWrapper &batch, WriteOptionsWrapper &options) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     Status status = m_db->Write(options.get(), &batch.get());
     if (!status.ok()) {
-      throw std::runtime_error(status.ToString());
+      throwJsError(status.ToString());
     }
   }
 
   IteratorWrapper *createIterator(ReadOptionsWrapper &options) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     Iterator *iter = m_db->NewIterator(options.get());
@@ -393,7 +397,7 @@ public:
 
   void compactRange(const val &start_key, const val &limit_key) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     std::string start_str, limit_str;
@@ -418,7 +422,7 @@ public:
 
   std::string getProperty(const std::string &property) {
     if (!m_db) {
-      throw std::runtime_error("Database is not open");
+      throwJsError("Database is not open");
     }
 
     std::string value;
@@ -445,6 +449,7 @@ EMSCRIPTEN_BINDINGS(leveldb) {
 #if defined(LEVELDB_PLATFORM_EMSCRIPTEN)
   // Environment setup
   function("SetFS", &SetFS);
+  function("SetFileWriteBuffer", &SetFileWriteBuffer);
 #endif
 
   // Options classes

@@ -2,6 +2,13 @@ var EmLDB = null;
 var EmLDBPromise = null;
 var EmLDBMemoryProfile = null;
 
+// Matches kDefaultFileWriteBuffer in src/env_emscripten.cc.
+var DEFAULT_FILE_WRITE_BUFFER = 64 * 1024;
+
+// TextEncoder is stateless, and constructing one per call cost 0.25us/op on the
+// string-key path (measured), which is several percent of a random read.
+const TEXT_ENCODER = new TextEncoder();
+
 function resolveModule(profile) {
   return profile === "scalable"
     ? require("../dist/libleveldb-growth.js")
@@ -15,7 +22,11 @@ function normalizeInitializationOptions(options) {
   const memory = options.memory == null ? "performance" : options.memory;
   if (memory !== "performance" && memory !== "scalable")
     throw new RangeError('memory must be "performance" or "scalable"');
-  return memory;
+  const fileWriteBuffer = options.fileWriteBuffer == null
+    ? DEFAULT_FILE_WRITE_BUFFER
+    : options.fileWriteBuffer;
+  assertInteger(fileWriteBuffer, "fileWriteBuffer", 0, 0xffffffff);
+  return { memory, fileWriteBuffer };
 }
 
 // ----------------------------------------------------------------------------
@@ -33,7 +44,7 @@ function toUint8Array(data) {
   if (data instanceof Uint8Array)
     return data;
   if (typeof data === "string")
-    return new TextEncoder().encode(data);
+    return TEXT_ENCODER.encode(data);
   throw new Error("Data must be a string or Uint8Array");
 }
 
@@ -498,14 +509,17 @@ class LevelDB {
   };
 
   static async initialize(options) {
-    const memory = normalizeInitializationOptions(options);
-    if (EmLDBMemoryProfile && EmLDBMemoryProfile !== memory)
+    const config = normalizeInitializationOptions(options);
+    if (EmLDBMemoryProfile && EmLDBMemoryProfile !== config.memory)
       throw new Error(`LevelDB is already initialized with the ${EmLDBMemoryProfile} memory profile`);
 
     if (!EmLDBPromise) {
-      EmLDBMemoryProfile = memory;
-      EmLDBPromise = resolveModule(memory)().then(function (module) {
+      EmLDBMemoryProfile = config.memory;
+      EmLDBPromise = resolveModule(config.memory)().then(function (module) {
         module.SetFS(require("fs"));
+        // Must happen before any DB is opened: the native side reads it when it
+        // creates a writable file, and there is no per-database hook for it.
+        module.SetFileWriteBuffer(config.fileWriteBuffer);
         EmLDB = module;
         return true;
       }).catch(function (error) {

@@ -126,6 +126,18 @@ export interface LevelDBOptions {
 export interface LevelDBInitializationOptions {
   /** Fixed 128MB heap for maximum pthread performance, or growable heap up to 2GB. */
   memory?: 'performance' | 'scalable';
+  /**
+   * Bytes buffered per writable file before it is handed to the OS
+   * (default 65536). Merging writes is what keeps sequential put throughput
+   * up: LevelDB emits two writes per log record, and every one of them
+   * otherwise crosses into Node's fs.
+   *
+   * Set 0 to flush on every write instead. That costs the higher syscall rate
+   * but keeps the upstream leveldb guarantee that a write acknowledged by
+   * `put` has already left the process - with buffering on, a process crash
+   * can lose up to this many bytes of the log tail.
+   */
+  fileWriteBuffer?: number;
 }
 
 /**
