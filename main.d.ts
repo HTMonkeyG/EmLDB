@@ -121,6 +121,14 @@ export interface LevelDBOptions {
    * @deprecated See comparator.
    */
   comparatorName?: string;
+
+  /**
+   * XOR encryption key in MCNE compatibility. MCNE support is enabled when
+   * the key is provided.
+   * 
+   * Default: "" (disabled)
+   */
+  mcneEncryptionKey?: string | Uint8Array;
 }
 
 export interface LevelDBInitializationOptions {

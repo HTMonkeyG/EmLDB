@@ -23,7 +23,7 @@
 #include <leveldb/slice.h>
 #include "port/port.h"
 #include "util/mutexlock.h"
-#include "emldb_utils.h"
+#include "util/emldb_utils.h"
 
 namespace leveldb {
 
@@ -535,7 +535,9 @@ public:
       emscripten::val fs = GetFS();
       fdNum = fs.call<i32>("openSync", fname, std::string("r"));
       emscripten::val stats = fs.call<emscripten::val>("fstatSync", fdNum);
-      *file_size = stats["size"].as<u64>();
+      // NOTE: In some cases, emscripten cannot convert js number (double) to
+      //       uint64_t directly, so we convert it to f64 first.
+      *file_size = (u64)stats["size"].as<f64>();
       fs.call<void>("closeSync", fdNum);
       return Status::OK();
     } catch (const emscripten::val &error) {

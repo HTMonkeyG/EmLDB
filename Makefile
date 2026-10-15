@@ -2,12 +2,13 @@ MAKEFLAGS += -s -j6
 .DEFAULT_GOAL := all
 
 DIST_DIR = ./dist
-SRC_DIR = ./deps/leveldb-mcpe
+LEVELDB_DIR = ./deps/leveldb-mcpe
+SRC_DIR = ./src
 
 CXX = em++
 CC = emcc
 
-SRC_DIRS = ./src $(SRC_DIR) $(wildcard $(SRC_DIR)/*/)
+SRC_DIRS = $(SRC_DIR) $(wildcard $(SRC_DIR)/*/) $(LEVELDB_DIR) $(wildcard $(LEVELDB_DIR)/*/)
 
 CFLAGS = -std=c++11 -O3 -flto -pthread -fexceptions -DNDEBUG -MMD -MP -s USE_ZLIB=1
 # Keep the tracked Emscripten port shim ahead of the submodule so a clean
@@ -70,9 +71,10 @@ CPP_SRC = db/builder.cc\
 	db/zlib_compressor.cc\
 	db/zstd_compressor.cc\
 	port/port_emscripten.cc\
-	emldb_utils.cc\
-	emldb.cc\
-	env_emscripten.cc
+	util/emldb_utils.cc\
+	util/env_emscripten.cc\
+	mcne/leveldb_mcne.cc\
+	emldb.cc
 CPP_OBJ = $(addprefix $(DIST_DIR)/, $(notdir $(CPP_SRC:.cc=.o)))
 DEP_FILES = $(CPP_OBJ:.o=.d)
 
