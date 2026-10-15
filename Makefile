@@ -73,6 +73,7 @@ CPP_SRC = db/builder.cc\
 	port/port_emscripten.cc\
 	util/emldb_utils.cc\
 	util/env_emscripten.cc\
+	mcne/leveldb_mcne.cc\
 	emldb.cc
 CPP_OBJ = $(addprefix $(DIST_DIR)/, $(notdir $(CPP_SRC:.cc=.o)))
 DEP_FILES = $(CPP_OBJ:.o=.d)

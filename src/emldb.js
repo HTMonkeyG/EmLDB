@@ -153,9 +153,10 @@ class LevelDBOptions {
         throw new Error("compressionLevel requires an explicit compression option");
       }
 
-      if (options.mcneEncryptionKey != null && options.mcneEncryptionKey !== "") {
-        const key = new Uint8Array(8);
-        key.set(toUint8Array(options.mcneEncryptionKey).slice(0, 8));
+      if (options.mcneEncryptionKey != null) {
+        const key = toUint8Array(options.mcneEncryptionKey);
+        if (key.byteLength !== 8)
+          throw new Error("mcneEncryptionKey must be 8 bytes length");
         this.opt.setMcneWrapper(true, key);
       } else {
         this.opt.setMcneWrapper(false, "");

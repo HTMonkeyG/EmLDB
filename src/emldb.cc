@@ -282,7 +282,9 @@ public:
     if (!status.ok()) {
       throw std::runtime_error(status.ToString());
     }
-    return stringToJsArray(result);
+    return result.size() == 8
+      ? stringToJsArray(result)
+      : val::undefined();
   }
 
   static void encrypt(const std::string &path, OptionsWrapper &options, const val &key) {

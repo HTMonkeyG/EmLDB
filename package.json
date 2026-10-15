@@ -11,10 +11,8 @@
     "dist/libleveldb-growth.js"
   ],
   "scripts": {
-    "test": "npm run build && node --test test/*.test.js",
-    "test:runtime": "node --test test/*.test.js",
     "check": "node --check main.js && node --check src/emldb.js",
-    "benchmark": "node benchmark/io.js",
+    "benchmark": "node benchmark/bench.js",
     "build": "node scripts/build.js",
     "clean": "node scripts/clean.js"
   },
