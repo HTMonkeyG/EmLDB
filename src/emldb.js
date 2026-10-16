@@ -544,7 +544,6 @@ class LevelDB {
     if (!EmLDBPromise) {
       EmLDBMemoryProfile = memory;
       EmLDBPromise = resolveModule(memory)().then(function (module) {
-        module.SetFS(require("fs"));
         EmLDB = module;
         return true;
       }).catch(function (error) {

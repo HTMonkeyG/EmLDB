@@ -74,6 +74,7 @@ CPP_SRC = db/builder.cc\
 	db/zstd_compressor.cc\
 	port/port_emscripten.cc\
 	util/emldb_utils.cc\
+	util/emldb_fs.cc\
 	util/env_emscripten.cc\
 	mcne/leveldb_mcne.cc\
 	emldb.cc
