@@ -372,6 +372,27 @@ export class LevelDB {
   static repair(path: string, options?: LevelDBOptions): void;
 
   /**
+   * If a database uses NetEase's 8-byte XOR encryption, you may need to
+   * call this function to infer its key. The function returns an 8-byte
+   * Uint8Array, or undefined if the inference fails.
+   *
+   * @param path - Path to the database
+   * @param options - Database options
+   */
+  static infer(path: string, options?: LevelDBOptions): Uint8Array | undefined;
+
+  /**
+   * This function performs decryption in place on the encrypted database,
+   * or performs decryption on an unencrypted database. This function modifies
+   * files, so call it with caution.
+   *
+   * @param path - Path to the database
+   * @param options - Database options
+   * @param key - Encryption key
+   */
+  static encrypt(path: string, options?: LevelDBOptions, key: Uint8Array): void;
+
+  /**
    * Create a new LevelDB instance.
    *
    * @param path - Path to the database
