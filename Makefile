@@ -19,6 +19,8 @@ CFLAGS += -Wall -Wformat -Wno-unused-variable -Wno-attributes -Wno-sign-compare
 
 LFLAGS_COMMON = -lm -flto --bind -msimd128 -fexceptions
 LFLAGS_COMMON += -s USE_ZLIB=1\
+	-s EXPORT_EXCEPTION_HANDLING_HELPERS=1\
+	-s EXPORTED_RUNTIME_METHODS='stackSave,stackRestore'\
 	-s TOTAL_STACK=4MB\
 	-s SINGLE_FILE=1\
 	-s WASM=1\
@@ -72,6 +74,7 @@ CPP_SRC = db/builder.cc\
 	db/zstd_compressor.cc\
 	port/port_emscripten.cc\
 	util/emldb_utils.cc\
+	util/emldb_fs.cc\
 	util/env_emscripten.cc\
 	mcne/leveldb_mcne.cc\
 	emldb.cc

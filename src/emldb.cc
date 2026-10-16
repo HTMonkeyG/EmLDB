@@ -27,9 +27,6 @@ using namespace emscripten;
 
 namespace leveldb {
 
-// Forward declaration of SetFS function from env_emscripten.cc
-void SetFS(emscripten::val fs);
-
 // ----------------------------------------------------------------------------
 // Compressors
 // ----------------------------------------------------------------------------
@@ -422,9 +419,6 @@ private:
 
 EMSCRIPTEN_BINDINGS(leveldb) {
   using namespace leveldb;
-
-  // Environment setup
-  function("SetFS", &SetFS);
 
   // Options classes
   class_<OptionsWrapper>("Options")
