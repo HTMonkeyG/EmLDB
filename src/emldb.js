@@ -18,6 +18,30 @@ function normalizeInitializationOptions(options) {
   return memory;
 }
 
+// Check whether EmLDB is set.
+function GUARD_checkEmLDB() {
+  if (!EmLDB)
+    throw new Error("LevelDB not initialized.");
+}
+
+// Call with stack restore.
+// WARN: The function is slower than raw try-finally-restore. DO NOT use in hot
+//       paths.
+function GUARD_safeCall(emfunc, ...args) {
+  const sp = EmLDB.stackSave();
+  try {
+    emfunc(...args);
+  } catch (e) {
+    EmLDB.stackRestore(sp);
+  }
+}
+
+function GUARD_getException(e) {
+  if (typeof e === "number" || e instanceof WebAssembly.Exception)
+    return new Error(EmLDB.getExceptionMessage(e));
+  return e;
+}
+
 // ----------------------------------------------------------------------------
 // [SECTION] UTILS
 // ----------------------------------------------------------------------------
@@ -83,10 +107,13 @@ class LevelDBOptions {
     if (options == null) options = {};
     if (typeof options !== "object" || Array.isArray(options))
       throw new TypeError("options must be an object");
-    this.opt = new EmLDB.Options();
 
+    GUARD_checkEmLDB();
+
+    this.opt = new EmLDB.Options();
     LevelDBOptions.GC.register(this, this.opt, this);
 
+    const sp = EmLDB.stackSave();
     try {
       // Apply options
       if (options.createIfMissing != null) {
@@ -168,8 +195,9 @@ class LevelDBOptions {
       if (options.comparator != null)
         throw new Error("JavaScript comparators are not supported by the threaded build");
     } catch (error) {
+      EmLDB.stackRestore(sp);
       this.free();
-      throw error;
+      throw GUARD_getException(error);
     }
   }
 
@@ -197,10 +225,13 @@ class LevelDBReadOptions {
     if (options == null) options = {};
     if (typeof options !== "object" || Array.isArray(options))
       throw new TypeError("read options must be an object");
-    this.opt = new EmLDB.ReadOptions();
 
+    GUARD_checkEmLDB();
+
+    this.opt = new EmLDB.ReadOptions();
     LevelDBReadOptions.GC.register(this, this.opt, this);
 
+    const sp = EmLDB.stackSave();
     try {
       if (options.verifyChecksums != null) {
         assertBoolean(options.verifyChecksums, "verifyChecksums");
@@ -211,8 +242,9 @@ class LevelDBReadOptions {
         this.opt.setFillCache(options.fillCache);
       }
     } catch (error) {
+      EmLDB.stackRestore(sp);
       this.free();
-      throw error;
+      throw GUARD_getException(error);
     }
   }
 
@@ -240,18 +272,21 @@ class LevelDBWriteOptions {
     if (options == null) options = {};
     if (typeof options !== "object" || Array.isArray(options))
       throw new TypeError("write options must be an object");
-    this.opt = new EmLDB.WriteOptions();
+    GUARD_checkEmLDB();
 
+    this.opt = new EmLDB.WriteOptions();
     LevelDBWriteOptions.GC.register(this, this.opt, this);
 
+    const sp = EmLDB.stackSave();
     try {
       if (options.sync != null) {
         assertBoolean(options.sync, "sync");
         this.opt.setSync(options.sync);
       }
     } catch (error) {
+      EmLDB.stackRestore(sp);
       this.free();
-      throw error;
+      throw GUARD_getException(error);
     }
   }
 
@@ -260,9 +295,7 @@ class LevelDBWriteOptions {
   }
 
   free() {
-    if (!this.opt)
-      return;
-
+    if (!this.opt) return;
     LevelDBWriteOptions.GC.unregister(this);
     const opt = this.opt;
     this.opt = null;
@@ -280,8 +313,7 @@ class LevelDBWriteBatch {
   });
 
   constructor() {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     this.batch = new EmLDB.WriteBatch();
     LevelDBWriteBatch.GC.register(this, this.batch, this);
   }
@@ -318,9 +350,7 @@ class LevelDBWriteBatch {
   }
 
   free() {
-    if (!this.batch)
-      return;
-
+    if (!this.batch) return;
     LevelDBWriteBatch.GC.unregister(this);
     const batch = this.batch;
     this.batch = null;
@@ -531,62 +561,69 @@ class LevelDB {
   }
 
   static destroy(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     assertPath(path);
 
     var opt = new LevelDBOptions(options);
+
+    const sp = EmLDB.stackSave();
     try {
       EmLDB.DB.destroy(path, opt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       opt.free();
     }
   }
 
   static repair(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     assertPath(path);
 
     var opt = new LevelDBOptions(options);
+
+    const sp = EmLDB.stackSave();
     try {
       EmLDB.DB.repair(path, opt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       opt.free();
     }
   }
 
   static infer(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     assertPath(path);
 
     var opt = new LevelDBOptions(options)
       , result = void 0;
+
+    const sp = EmLDB.stackSave();
     try {
       result = EmLDB.DB.infer(path, opt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       opt.free();
       return result;
     }
   }
 
   static encrypt(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     assertPath(path);
 
     var opt = new LevelDBOptions(options);
+
+    const sp = EmLDB.stackSave();
     try {
       EmLDB.DB.encrypt(path, opt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       opt.free();
     }
   }
 
   constructor(path, options) {
-    if (!EmLDB)
-      throw new Error("LevelDB not initialized.");
+    GUARD_checkEmLDB();
     assertPath(path);
     if (options != null && (typeof options !== "object" || Array.isArray(options)))
       throw new TypeError("options must be an object");
@@ -622,6 +659,7 @@ class LevelDB {
     var defaultWriteOpt = null;
     var defaultReadOpt = null;
 
+    const sp = EmLDB.stackSave();
     try {
       opt = new LevelDBOptions(this.options);
       db = new EmLDB.DB();
@@ -629,11 +667,12 @@ class LevelDB {
       defaultReadOpt = new LevelDBReadOptions();
       db.open(this.path, opt.get());
     } catch (e) {
+      EmLDB.stackRestore(sp);
       try { if (db) db.delete(); } catch (_) { }
       try { if (opt) opt.free(); } catch (_) { }
       try { if (defaultWriteOpt) defaultWriteOpt.free(); } catch (_) { }
       try { if (defaultReadOpt) defaultReadOpt.free(); } catch (_) { }
-      throw e;
+      throw GUARD_getException(e);
     }
 
     // The db keeps raw pointers to what the options own (block cache, filter
@@ -704,10 +743,12 @@ class LevelDB {
     value = toUint8Array(value);
     var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
+    const sp = EmLDB.stackSave();
     try {
       this.db.put(key, value, wopt.get());
       return true;
     } finally {
+      EmLDB.stackRestore(sp);
       if (wopt != this.defaultWriteOpt) wopt.free();
     }
   }
@@ -718,11 +759,14 @@ class LevelDB {
     key = toUint8Array(key);
     var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
+    const sp = EmLDB.stackSave();
     try {
       this.db.del(key, wopt.get());
       return true;
     } finally {
+      EmLDB.stackRestore(sp);
       if (wopt != this.defaultWriteOpt) wopt.free();
+      return false;
     }
   }
 
@@ -733,17 +777,21 @@ class LevelDB {
 
     var wopt = options ? new LevelDBWriteOptions(options) : this.defaultWriteOpt;
 
+    const sp = EmLDB.stackSave();
     try {
       this.db.write(batch.get(), wopt.get());
       return true;
     } finally {
+      EmLDB.stackRestore(sp);
       if (wopt != this.defaultWriteOpt) wopt.free();
+      return false;
     }
   }
 
   batch(operations) {
     var batch = new LevelDBWriteBatch();
 
+    const sp = EmLDB.stackSave();
     try {
       if (operations != null && !Array.isArray(operations))
         throw new TypeError("operations must be an array");
@@ -764,8 +812,9 @@ class LevelDB {
         }
       }
     } catch (error) {
+      EmLDB.stackRestore(sp);
       batch.free();
-      throw error;
+      throw GUARD_getException(error);
     }
 
     return batch;
@@ -777,9 +826,11 @@ class LevelDB {
     key = toUint8Array(key);
     var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
 
+    const sp = EmLDB.stackSave();
     try {
       return this.db.get(key, ropt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       if (ropt != this.defaultReadOpt) ropt.free();
     }
   }
@@ -808,9 +859,11 @@ class LevelDB {
     var ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
     var iter;
 
+    const sp = EmLDB.stackSave();
     try {
       iter = this.db.createIterator(ropt.get());
     } finally {
+      EmLDB.stackRestore(sp);
       if (ropt != this.defaultReadOpt) ropt.free();
     }
 
