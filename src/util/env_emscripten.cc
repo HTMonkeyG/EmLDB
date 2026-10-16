@@ -159,7 +159,9 @@ private:
 // construction from the atomic global.
 class EmWritableFile: public WritableFile {
 private:
-  const size_t kFileWriteBuffer = 64 * 1024;
+  // In common MCBE saves, block_size is typically 163840. Therefore, the file
+  // buffer is set to twice that value for better results.
+  static constexpr size_t kFileWriteBuffer = 320 * 1024;
 
 public:
   EmWritableFile(const std::string &path, i32 fd)
@@ -213,6 +215,7 @@ public:
   virtual Status Flush() override {
     // LevelDB calls this after every physical record, so flushing here would
     // defeat the buffer entirely.
+    //return m_FlushBuffer();
     return Status::OK();
   }
 
