@@ -48,6 +48,39 @@ function toUint8Array(data) {
   throw new Error("Data must be a string or Uint8Array");
 }
 
+function packKeys(keys) {
+  if (!Array.isArray(keys))
+    throw new TypeError("keys must be an array");
+  if (keys.length >= 0xffffffff)
+    throw new RangeError("too many keys");
+
+  const encoded = new Array(keys.length);
+  let byteLength = 0;
+  for (let i = 0; i < keys.length; i++) {
+    try {
+      encoded[i] = toUint8Array(keys[i]);
+    } catch (_) {
+      throw new TypeError(`keys[${i}] must be a string or Uint8Array`);
+    }
+    byteLength += encoded[i].byteLength;
+    if (byteLength > 0xffffffff)
+      throw new RangeError("packed keys exceed the 32-bit size limit");
+  }
+
+  const offsetsByteLength = (keys.length + 1) * Uint32Array.BYTES_PER_ELEMENT;
+  if (byteLength + offsetsByteLength > 0xffffffff)
+    throw new RangeError("packed keys exceed the 32-bit size limit");
+  const packed = new Uint8Array(byteLength + offsetsByteLength);
+  const view = new DataView(packed.buffer);
+  let offset = 0;
+  for (let i = 0; i < encoded.length; i++) {
+    packed.set(encoded[i], offset);
+    offset += encoded[i].byteLength;
+    view.setUint32(byteLength + (i + 1) * 4, offset, true);
+  }
+  return { packed, keyBytes: byteLength, count: keys.length };
+}
+
 function assertBoolean(value, name) {
   if (typeof value !== "boolean")
     throw new TypeError(`${name} must be a boolean`);
@@ -78,6 +111,67 @@ function releaseDBState(state) {
     try {
       if (state[name]) state[name].free();
     } catch (_) { }
+  }
+}
+
+// ----------------------------------------------------------------------------
+// [SECTION] NATIVE ERROR CONVERSION
+// ----------------------------------------------------------------------------
+
+// Embind classes whose methods can raise a native error.
+const NATIVE_CLASSES = ["Options", "ReadOptions", "WriteOptions", "WriteBatch", "Iterator", "DB"];
+
+// Rebuild the Error that throwJsError() parked before throwing.
+//
+// A C++ exception escaping the embind boundary arrives here as the exception
+// pointer rather than an Error, because the JS-based exception scheme has no
+// way to carry a payload across. The matching message was stored natively
+// first, so read it back and hand the caller a normal Error.
+function toJsError(thrown) {
+  if (thrown instanceof Error)
+    return thrown;
+
+  var message = "";
+  try { message = EmLDB.takeLastError(); } catch (_) { }
+  return new Error(message || "LevelDB operation failed");
+}
+
+// Wrap every binding once, so that no call site has to remember the conversion
+// and a native failure can never surface as a bare number.
+function installNativeErrorConversion(module) {
+  const targets = [];
+  for (const name of NATIVE_CLASSES) {
+    const cls = module[name];
+    if (typeof cls !== "function")
+      continue;
+    if (cls.prototype) targets.push(cls.prototype);
+    targets.push(cls);
+  }
+
+  for (const target of targets) {
+    for (const name of Object.getOwnPropertyNames(target)) {
+      if (name === "prototype" || name === "constructor")
+        continue;
+      const descriptor = Object.getOwnPropertyDescriptor(target, name);
+      if (!descriptor || typeof descriptor.value !== "function")
+        continue;
+
+      const original = descriptor.value;
+      try {
+        Object.defineProperty(target, name, {
+          ...descriptor,
+          value: function (...args) {
+            try {
+              return original.apply(this, args);
+            } catch (thrown) {
+              throw toJsError(thrown);
+            }
+          }
+        });
+      } catch (_) {
+        // A non-configurable binding keeps its original behaviour.
+      }
+    }
   }
 }
 
@@ -554,6 +648,7 @@ class LevelDB {
         // creates a writable file, and there is no per-database hook for it.
         module.SetFileWriteBuffer(config.fileWriteBuffer);
         EmLDB = module;
+        installNativeErrorConversion(module);
         return true;
       }).catch(function (error) {
         EmLDBPromise = null;
@@ -791,6 +886,62 @@ class LevelDB {
       return this.db.get(key, ropt.get());
     } finally {
       if (ropt != this.defaultReadOpt) ropt.free();
+    }
+  }
+
+  // Retrieve multiple values in one Wasm call. The returned buffers are owned
+  // by the caller and remain valid across later database operations.
+  getMany(keys, options) {
+    this.validate();
+    const input = packKeys(keys);
+    if (input.count === 0) {
+      return {
+        data: new Uint8Array(0),
+        offsets: new Uint32Array([0]),
+        found: new Uint8Array(0)
+      };
+    }
+
+    const ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
+    try {
+      const packedResult = this.db.getMany(input.packed, input.keyBytes, input.count, ropt.get());
+      const found = packedResult.slice(0, input.count);
+      const offsetsStart = input.count;
+      const dataStart = offsetsStart + (input.count + 1) * Uint32Array.BYTES_PER_ELEMENT;
+      if (packedResult.length < dataStart)
+        throw new Error("invalid packed batch result");
+      const offsets = new Uint32Array(input.count + 1);
+      const view = new DataView(packedResult.buffer, packedResult.byteOffset, packedResult.byteLength);
+      for (let i = 0; i <= input.count; i++) {
+        offsets[i] = view.getUint32(offsetsStart + i * 4, true);
+        if ((i === 0 && offsets[i] !== 0) ||
+            (i > 0 && offsets[i] < offsets[i - 1]) ||
+            offsets[i] > packedResult.length - dataStart) {
+          throw new Error("invalid packed batch result offsets");
+        }
+      }
+      if (offsets[input.count] !== packedResult.length - dataStart ||
+          found.some((value) => value > 1)) {
+        throw new Error("invalid packed batch result");
+      }
+      return { data: packedResult.slice(dataStart), offsets, found };
+    } finally {
+      if (ropt !== this.defaultReadOpt) ropt.free();
+    }
+  }
+
+  // Test whether multiple keys exist without creating a value view per key.
+  hasMany(keys, options) {
+    this.validate();
+    const input = packKeys(keys);
+    if (input.count === 0)
+      return new Uint8Array(0);
+
+    const ropt = options ? new LevelDBReadOptions(options) : this.defaultReadOpt;
+    try {
+      return this.db.hasMany(input.packed, input.keyBytes, input.count, ropt.get());
+    } finally {
+      if (ropt !== this.defaultReadOpt) ropt.free();
     }
   }
 

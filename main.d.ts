@@ -185,6 +185,18 @@ export type LevelDBBatchOperation =
   | { type: 'del'; key: Uint8Array | string };
 
 /**
+ * Packed result returned by LevelDB.getMany().
+ */
+export interface LevelDBManyGetResult {
+  /** Concatenated values, owned by the caller. */
+  data: Uint8Array;
+  /** Value boundaries; item i spans offsets[i] through offsets[i + 1]. */
+  offsets: Uint32Array;
+  /** One byte per key: 1 if found, otherwise 0. */
+  found: Uint8Array;
+}
+
+/**
  * Write batch for atomic batch operations.
  */
 export class LevelDBWriteBatch {
@@ -448,6 +460,20 @@ export class LevelDB {
    * @throws Error if get fails
    */
   get(key: Uint8Array | string, options?: LevelDBReadOptions): Uint8Array | undefined;
+
+  /**
+   * Read many keys in one batch. Keys and result values preserve input order,
+   * including duplicates. `data.subarray(offsets[i], offsets[i + 1])` is the
+   * value for key i when `found[i]` is 1; `found` distinguishes missing keys
+   * from keys whose stored value is empty. Returned arrays own their memory.
+   */
+  getMany(keys: Array<Uint8Array | string>, options?: LevelDBReadOptions): LevelDBManyGetResult;
+
+  /**
+   * Check whether many keys exist without returning their values.
+   * Returns one byte per key (1 found, 0 missing), in input order.
+   */
+  hasMany(keys: Array<Uint8Array | string>, options?: LevelDBReadOptions): Uint8Array;
 
   /**
    * Compact the underlying storage for the key range [startKey, limitKey].

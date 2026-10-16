@@ -58,6 +58,29 @@ main().catch(console.error);
 Keys and values accept strings or `Uint8Array`. Strings are encoded as UTF-8;
 reads always return `Uint8Array`.
 
+### Batched reads
+
+Use `getMany()` to fetch multiple values with one JS/Wasm call. Values are
+concatenated into an owned `data` array; `offsets` identifies each value, while
+`found` distinguishes a missing key from a stored empty value. Input order and
+duplicates are preserved.
+
+```js
+const result = db.getMany(["foo", "missing", "empty"]);
+for (let i = 0; i < result.found.length; i++) {
+  if (result.found[i]) {
+    const value = result.data.subarray(result.offsets[i], result.offsets[i + 1]);
+    console.log(value);
+  }
+}
+
+const present = db.hasMany(["foo", "missing"]); // Uint8Array [1, 0]
+```
+
+The returned arrays own their memory and remain valid after subsequent database
+operations. `hasMany()` only returns one presence byte per key and avoids
+creating a value view for every match.
+
 ## Performance tuning
 
 EmLDB ships LevelDB's upstream option defaults. For the small-key / small-value

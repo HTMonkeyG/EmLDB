@@ -5,6 +5,7 @@
 // Provides high-performance JavaScript interface to LevelDB C++ API.
 
 #include <emscripten/bind.h>
+#include <emscripten/em_js.h>
 #include <emscripten/val.h>
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
@@ -17,6 +18,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <cstring>
 #include <cmath>
 #include <stdexcept>
 
@@ -36,6 +38,30 @@ void SetFileWriteBuffer(size_t bytes);
 // JavaScript Comparator Wrapper
 // ----------------------------------------------------------------------------
 
+// Invokes the user's comparator from JavaScript, where a throwing callback can
+// still be caught.
+//
+// Calling the stored val directly from C++ would let a JavaScript exception
+// unwind through the wasm frames, which skips their destructors and the stack
+// pointer restore. Going through JavaScript is also the only option that works
+// on LevelDB's compaction worker, where there is no C++ frame above to catch
+// anything.
+//
+// Returns 0 with *resultOut set, or 1 when the callback threw or returned a
+// non-finite value.
+EM_JS(int, emJsCompareKeys, (emscripten::EM_VAL comparator, const uint8_t *a, size_t aLength,
+                             const uint8_t *b, size_t bLength, int *resultOut), {
+  try {
+    var compare = Emval.toValue(comparator);
+    var value = Number(compare(HEAPU8.slice(a, a + aLength), HEAPU8.slice(b, b + bLength)));
+    if (!isFinite(value)) return 1;
+    HEAP32[resultOut >> 2] = value < 0 ? -1 : (value > 0 ? 1 : 0);
+    return 0;
+  } catch (error) {
+    return 1;
+  }
+});
+
 // Bridges JavaScript comparison function to LevelDB Comparator interface.
 class JSComparator: public Comparator {
 public:
@@ -46,16 +72,23 @@ public:
   virtual ~JSComparator() noexcept override = default;
 
   virtual int Compare(const Slice &a, const Slice &b) const override {
-    val a_array = stringToJsArray(std::string(a.data(), a.size()));
-    val b_array = stringToJsArray(std::string(b.data(), b.size()));
-    double result = m_jsCompare(a_array, b_array).as<double>();
-    if (!std::isfinite(result)) {
-      // Stays a C++ exception: comparisons run on LevelDB's compaction worker,
-      // where there is no JavaScript to raise an Error on. Unreachable anyway,
-      // since the JS layer rejects comparators on the threaded build.
-      throw std::runtime_error("Comparator must return a finite number");
+    int result = 0;
+    const int status = emJsCompareKeys(
+      m_jsCompare.as_handle(),
+      reinterpret_cast<const uint8_t *>(a.data()), a.size(),
+      reinterpret_cast<const uint8_t *>(b.data()), b.size(),
+      &result);
+    if (status == 0) {
+      return result;
     }
-    return result < 0 ? -1 : (result > 0 ? 1 : 0);
+
+    // Compare has to be total, and it cannot fail loudly from here: it runs on
+    // the compaction worker, where a thrown exception would escape the thread
+    // entry point and terminate the process, and LevelDB has no Status to carry
+    // a comparator failure. Fall back to bytewise ordering, which is at least a
+    // valid total order. The JS layer rejects comparators outright on this
+    // threaded build, so this path is unreachable in practice.
+    return BytewiseComparator()->Compare(a, b);
   }
 
   virtual cstring Name() const override { return m_name.c_str(); }
@@ -420,6 +453,118 @@ public:
     return emJsView(m_scratch.data(), m_scratch.size());
   }
 
+  val getMany(const val &packedInput, uint32_t keyBytesSize, uint32_t count,
+              ReadOptionsWrapper &options) {
+    if (!m_db) {
+      throwJsError("Database is not open");
+    }
+
+    std::string input = jsArrayToString(packedInput);
+    const uint64_t offsetsSize = (static_cast<uint64_t>(count) + 1) * sizeof(uint32_t);
+    if (static_cast<uint64_t>(keyBytesSize) + offsetsSize != input.size()) {
+      throwJsError("invalid packed batch keys");
+    }
+    if (count == 0) {
+      return stringToJsArray(std::string());
+    }
+
+    if (count > (0xffffffffu - 5u) / 5u) {
+      throwJsError("too many keys for batch result");
+    }
+    const uint64_t resultMetadataSize = static_cast<uint64_t>(count) +
+        (static_cast<uint64_t>(count) + 1) * sizeof(uint32_t);
+    if (resultMetadataSize > 0xffffffffu) {
+      throwJsError("too many keys for batch result");
+    }
+
+    const char *keys = input.data();
+    const char *encodedOffsets = keys + keyBytesSize;
+    uint32_t firstOffset, finalOffset;
+    memcpy(&firstOffset, encodedOffsets, sizeof(uint32_t));
+    memcpy(&finalOffset, encodedOffsets + count * sizeof(uint32_t), sizeof(uint32_t));
+    if (firstOffset != 0 || finalOffset != keyBytesSize) {
+      throwJsError("invalid packed batch key offsets");
+    }
+    std::vector<uint32_t> offsets(count + 1);
+    std::vector<uint8_t> found(count, 0);
+    std::string valuesData;
+    std::string value;
+    offsets[0] = 0;
+
+    for (uint32_t i = 0; i < count; ++i) {
+      uint32_t begin, end;
+      memcpy(&begin, encodedOffsets + i * sizeof(uint32_t), sizeof(uint32_t));
+      memcpy(&end, encodedOffsets + (i + 1) * sizeof(uint32_t), sizeof(uint32_t));
+      if (begin > end || end > keyBytesSize) {
+        throwJsError("invalid packed batch key offsets");
+      }
+
+      value.clear();
+      Status status = m_db->Get(options.get(), Slice(keys + begin, end - begin), &value);
+      if (status.IsNotFound()) {
+        value.clear();
+      } else if (!status.ok()) {
+        throwJsError(status.ToString());
+      } else {
+        found[i] = 1;
+        if (valuesData.size() + value.size() > 0xffffffffu - resultMetadataSize) {
+          throwJsError("batch result exceeds the 32-bit size limit");
+        }
+        valuesData.append(value);
+      }
+      offsets[i + 1] = static_cast<uint32_t>(valuesData.size());
+    }
+
+    std::string output;
+    output.reserve(static_cast<size_t>(resultMetadataSize) + valuesData.size());
+    output.append(reinterpret_cast<const char *>(found.data()), found.size());
+    output.append(reinterpret_cast<const char *>(offsets.data()), offsets.size() * sizeof(uint32_t));
+    output.append(valuesData);
+    return stringToJsArray(output);
+  }
+
+  val hasMany(const val &packedInput, uint32_t keyBytesSize, uint32_t count,
+              ReadOptionsWrapper &options) {
+    if (!m_db) {
+      throwJsError("Database is not open");
+    }
+
+    std::string input = jsArrayToString(packedInput);
+    const uint64_t offsetsSize = (static_cast<uint64_t>(count) + 1) * sizeof(uint32_t);
+    if (static_cast<uint64_t>(keyBytesSize) + offsetsSize != input.size()) {
+      throwJsError("invalid packed batch keys");
+    }
+    if (count == 0) {
+      return stringToJsArray(std::string());
+    }
+
+    const char *keys = input.data();
+    const char *encodedOffsets = keys + keyBytesSize;
+    uint32_t firstOffset, finalOffset;
+    memcpy(&firstOffset, encodedOffsets, sizeof(uint32_t));
+    memcpy(&finalOffset, encodedOffsets + count * sizeof(uint32_t), sizeof(uint32_t));
+    if (firstOffset != 0 || finalOffset != keyBytesSize) {
+      throwJsError("invalid packed batch key offsets");
+    }
+    std::vector<uint8_t> found(count, 0);
+    std::string value;
+    for (uint32_t i = 0; i < count; ++i) {
+      uint32_t begin, end;
+      memcpy(&begin, encodedOffsets + i * sizeof(uint32_t), sizeof(uint32_t));
+      memcpy(&end, encodedOffsets + (i + 1) * sizeof(uint32_t), sizeof(uint32_t));
+      if (begin > end || end > keyBytesSize) {
+        throwJsError("invalid packed batch key offsets");
+      }
+
+      value.clear();
+      Status status = m_db->Get(options.get(), Slice(keys + begin, end - begin), &value);
+      if (status.IsNotFound()) continue;
+      if (!status.ok()) throwJsError(status.ToString());
+      found[i] = 1;
+    }
+    return stringToJsArray(std::string(found.begin(), found.end()));
+  }
+
   void del(const val &key, WriteOptionsWrapper &options) {
     if (!m_db) {
       throwJsError("Database is not open");
@@ -512,6 +657,10 @@ EMSCRIPTEN_BINDINGS(leveldb) {
   function("SetFS", &SetFS);
   function("SetFileWriteBuffer", &SetFileWriteBuffer);
 #endif
+  // Reads and clears the message parked by throwJsError(). The JS boundary
+  // wrapper calls this right after a native call throws, because the exception
+  // itself reaches JavaScript as an opaque pointer.
+  function("takeLastError", &takePendingJsError);
 
   // Options classes
   class_<OptionsWrapper>("Options")
@@ -572,6 +721,8 @@ EMSCRIPTEN_BINDINGS(leveldb) {
     .function("put", &LevelDBWrapper::put)
     .function("get", &LevelDBWrapper::get)
     .function("getView", &LevelDBWrapper::getView)
+    .function("getMany", &LevelDBWrapper::getMany)
+    .function("hasMany", &LevelDBWrapper::hasMany)
     .function("del", &LevelDBWrapper::del)
     .function("write", &LevelDBWrapper::write)
     .function("createIterator", &LevelDBWrapper::createIterator, allow_raw_pointers())

@@ -357,11 +357,7 @@ class Benchmark {
     this.valueSize = flags.value_size;
     this.entriesPerBatch = 1;
     this.writeOptions = undefined;
-    // leveldb-mcpe's ReadOptions() defaults to verify_checksums=false and
-    // fill_cache=true (include/leveldb/options.h); db_bench relies on those
-    // defaults, so state them explicitly here.
-    this.readOptions = { verifyChecksums: false, fillCache: true };
-    this.stats = null;
+    this._randomReadBatches = null;
   }
 
   printHeader() {
@@ -384,6 +380,7 @@ class Benchmark {
     out.push(
       `Batch:     ${f.batch_size} entries (fillbatch defaults to 1000 when set to 1)`
     );
+    out.push(`ReadBatch: ${f.read_batch_size} keys`);
     out.push(
       `RawSize:   ${(((keySize + f.value_size) * f.num) / 1048576).toFixed(1)} MB (estimated)`
     );
@@ -570,6 +567,55 @@ class Benchmark {
     thread.stats.addMessage(`(${found} of ${this.num} found)`);
   }
 
+  prepareRandomBatches(rand) {
+    const pool = this.keyPool();
+    const count = this.reads;
+    const batchSize = this.flags.read_batch_size;
+    const batches = [];
+    for (let start = 0; start < count; start += batchSize) {
+      const end = Math.min(start + batchSize, count);
+      const batch = new Array(end - start);
+      for (let i = start; i < end; i++)
+        batch[i - start] = pool[rand.next() % this.flags.num];
+      batches.push(batch);
+    }
+    return batches;
+  }
+
+  readRandomBatch(thread) {
+    let found = 0;
+    for (const keys of this.randomRead.batches) {
+      let result;
+      try {
+        result = this.db.getMany(keys);
+      } catch (e) {
+        die('getMany error', e);
+      }
+      for (let i = 0; i < keys.length; i++) {
+        found += result.found[i];
+        thread.stats.finishedSingleOp();
+      }
+    }
+    thread.stats.addMessage(`(${found} of ${this.reads} found)`);
+  }
+
+  readRandomHas(thread) {
+    let found = 0;
+    for (const keys of this.randomRead.batches) {
+      let result;
+      try {
+        result = this.db.hasMany(keys);
+      } catch (e) {
+        die('hasMany error', e);
+      }
+      for (let i = 0; i < keys.length; i++) {
+        found += result[i];
+        thread.stats.finishedSingleOp();
+      }
+    }
+    thread.stats.addMessage(`(${found} of ${this.reads} found)`);
+  }
+
   readMissing(thread) {
     for (let i = 0; i < this.reads; i++) {
       const key = String(thread.rand.next() % this.flags.num).padStart(16, '0') + '.';
@@ -685,6 +731,8 @@ class Benchmark {
 
     let method = null;
     let freshDb = false;
+    let needsKeyPool = false;
+    let batchRandomReads = false;
 
     switch (name) {
       case 'open':
@@ -726,10 +774,22 @@ class Benchmark {
         method = () => this.readReverse(thread);
         break;
       case 'readrandom':
+        needsKeyPool = true;
         method = () => this.readRandom(thread);
+        break;
+      case 'readrandombatch':
+        needsKeyPool = true;
+        batchRandomReads = true;
+        method = () => this.readRandomBatch(thread);
+        break;
+      case 'readrandomhas':
+        needsKeyPool = true;
+        batchRandomReads = true;
+        method = () => this.readRandomHas(thread);
         break;
       case 'readrandomsmall':
         this.reads = Math.floor(this.reads / 1000);
+        needsKeyPool = true;
         method = () => this.readRandom(thread);
         break;
       case 'readmissing':
@@ -777,7 +837,14 @@ class Benchmark {
       this.open();
     }
 
+    if (needsKeyPool) this.keyPool();
+
     const thread = { stats: new Stats(this.flags.histogram), rand: new Random(301) };
+    if (batchRandomReads) {
+      this.randomRead = {
+        batches: this.prepareRandomBatches(new Random(301))
+      };
+    }
     thread.stats.start();
     method();
     thread.stats.stop();
@@ -824,6 +891,7 @@ function parseFlags(argv) {
     cache_size: 8 << 20,
     bloom_bits: -1,
     batch_size: 1,
+    read_batch_size: 1000,
     memory_profile: 'performance',
     compression: 'raw',
     compression_level: -1,
@@ -843,6 +911,7 @@ function parseFlags(argv) {
     '--bloom_bits': 'bloom_bits',
     '--open_files': 'open_files',
     '--batch_size': 'batch_size',
+    '--read_batch_size': 'read_batch_size',
     '--compression_level': 'compression_level',
     '--file_write_buffer': 'file_write_buffer',
   };
@@ -905,6 +974,8 @@ function parseFlags(argv) {
   flags.compression_id = compressionIds[flags.compression];
   if (!Number.isInteger(flags.batch_size) || flags.batch_size < 1)
     throw new Error('--batch_size must be a positive integer');
+  if (!Number.isSafeInteger(flags.read_batch_size) || flags.read_batch_size < 1)
+    throw new Error('--read_batch_size must be a positive safe integer');
   if (!Number.isInteger(flags.compression_level) || flags.compression_level < -1 || flags.compression_level > 9)
     throw new Error('--compression_level must be between -1 and 9');
   if (!Number.isSafeInteger(flags.num) || flags.num < 1)
@@ -940,6 +1011,7 @@ Usage: node bench.js [flags]
   --bloom_bits=<n>         Passed to EmLDB, negative uses its default
   --open_files=<n>         Passed to EmLDB
   --batch_size=<n>         Entries per write batch (fillbatch defaults to 1000)
+  --read_batch_size=<n>    Keys per getMany / hasMany call (default 1000)
   --memory_profile=<name>  performance (fixed heap) or scalable (growable heap)
   --file_write_buffer=<n>  Bytes buffered per writable file (default 65536).
                            Merging writes is what keeps the fill benchmarks up;
