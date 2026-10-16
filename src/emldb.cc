@@ -215,21 +215,8 @@ public:
   void next() { m_iter->Next(); }
   void prev() { m_iter->Prev(); }
 
-  val key() const {
-    if (!m_iter->Valid()) {
-      return val::undefined();
-    }
-    Slice k = m_iter->key();
-    return stringToJsArray(std::string(k.data(), k.size()));
-  }
-
-  val value() const {
-    if (!m_iter->Valid()) {
-      return val::undefined();
-    }
-    Slice v = m_iter->value();
-    return stringToJsArray(std::string(v.data(), v.size()));
-  }
+  val key() const { return m_iter->Valid() ? stringToJsArray(m_iter->key()) : val::undefined(); }
+  val value() const { return m_iter->Valid() ? stringToJsArray(m_iter->value()) : val::undefined(); }
 
 private:
   std::unique_ptr<Iterator> m_iter = {};

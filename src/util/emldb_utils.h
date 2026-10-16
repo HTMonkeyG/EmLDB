@@ -6,6 +6,7 @@
 #include <string>
 #include <utility>
 #include <emscripten/val.h>
+#include <leveldb/slice.h>
 
 // ----------------------------------------------------------------------------
 // Type definitions
@@ -40,5 +41,8 @@ std::string jsArrayToString(const emscripten::val &arr);
 
 // Convert std::string to JavaScript Uint8Array.
 emscripten::val stringToJsArray(const std::string &str);
+
+// Convert Slice to JavaScript Uint8Array.
+emscripten::val stringToJsArray(const leveldb::Slice &buf);
 
 #endif

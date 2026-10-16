@@ -1,6 +1,11 @@
 #include <emscripten.h>
 #include <emscripten/bind.h>
+#include <leveldb/slice.h>
 #include "emldb_utils.h"
+
+// ----------------------------------------------------------------------------
+// Utility Functions
+// ----------------------------------------------------------------------------
 
 // Convert JavaScript Uint8Array to std::string for binary data transfer.
 std::string jsArrayToString(const emscripten::val &arr) {
@@ -8,7 +13,8 @@ std::string jsArrayToString(const emscripten::val &arr) {
   std::string str(length, '\0');
   if (length != 0) {
     emscripten::val destination = emscripten::val(emscripten::typed_memory_view(
-      length, reinterpret_cast<u08 *>(&str[0])
+      length,
+      reinterpret_cast<u08 *>(&str[0])
     ));
     destination.call<void>("set", arr);
   }
@@ -19,10 +25,30 @@ std::string jsArrayToString(const emscripten::val &arr) {
 emscripten::val stringToJsArray(const std::string &str) {
   emscripten::val arr = emscripten::val::global("Uint8Array").new_(str.size());
   if (!str.empty()) {
-    emscripten::val source = emscripten::val(emscripten::typed_memory_view(str.size(),
+    emscripten::val source = emscripten::val(emscripten::typed_memory_view(
+      str.size(),
       reinterpret_cast<const u08 *>(str.data())
     ));
     arr.call<void>("set", source);
   }
   return arr;
 }
+
+// Convert Slice to JavaScript Uint8Array.
+emscripten::val stringToJsArray(const leveldb::Slice &buf) {
+  emscripten::val arr = emscripten::val::global("Uint8Array").new_(buf.size());
+  if (!buf.empty()) {
+    emscripten::val source = emscripten::val(emscripten::typed_memory_view(
+      buf.size(),
+      reinterpret_cast<const u08 *>(buf.data())
+    ));
+    arr.call<void>("set", source);
+  }
+  return arr;
+}
+
+// ----------------------------------------------------------------------------
+// No-op Logger
+// ----------------------------------------------------------------------------
+
+
