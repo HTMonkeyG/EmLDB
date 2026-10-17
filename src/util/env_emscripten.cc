@@ -149,6 +149,88 @@ private:
 };
 
 // Writable file implementation using Node.js fs.open/write/close.
+class EmWritableFile: public WritableFile {
+public:
+  EmWritableFile(const std::string &path, i32 fd)
+    : m_path(path), m_fd(fd) { }
+
+  EmWritableFile(const EmWritableFile &) = delete;
+  EmWritableFile& operator=(const EmWritableFile &) = delete;
+
+  virtual ~EmWritableFile() noexcept {
+    if (m_fd != -1) {
+      char message[1];
+      emldb::fs::close(m_fd, message, sizeof(message));
+    }
+  }
+
+  bool IsValid() const { return m_fd != -1; }
+
+  virtual Status Append(const Slice &data) override {
+    char message[256] = {};
+
+    if (m_fd == -1) return Status::IOError(m_path, "file not open");
+
+    size_t offset = 0;
+    while (offset < data.size()) {
+      const size_t remaining = data.size() - offset;
+      size_t written = 0;
+      const int code = emldb::fs::write(
+        m_fd,
+        (const u08 *)(data.data() + offset),
+        remaining,
+        &written,
+        message,
+        sizeof(message)
+      );
+      if (code != emldb::kFsOk) {
+        return FsError(m_path, "write", code, message);
+      }
+      if (written == 0 || written > remaining) {
+        return Status::IOError(m_path, "write made no progress");
+      }
+      offset += written;
+    }
+
+    return Status::OK();
+  }
+
+  virtual Status Close() override {
+    char message[256] = {};
+
+    if (m_fd == -1) return Status::OK();
+
+    i32 code = emldb::fs::close(m_fd, message, sizeof(message));
+    if (code != emldb::kFsOk)
+      return FsError(m_path, "close", code, message);
+
+    m_fd = -1;
+    return Status::OK();
+  }
+
+  virtual Status Flush() override {
+    // NOTE: Node.js has no user buffer.
+    return Status::OK();
+  }
+
+  virtual Status Sync() override {
+    char message[256] = {};
+
+    if (m_fd == -1) return Status::IOError(m_path, "file not open");
+
+    i32 code = emldb::fs::fsync(m_fd, message, sizeof(message));
+    if (code != emldb::kFsOk)
+      return FsError(m_path, "fsync", code, message);
+
+    return Status::OK();
+  }
+
+protected:
+  std::string m_path;
+  i32 m_fd;
+};
+
+// Buffered writable file implementation.
 //
 // Appends land in an in-process buffer that is handed to Node in one
 // fs.writeSync per kDefaultFileWriteBuffer bytes rather than one per Append.
@@ -157,20 +239,20 @@ private:
 // Every writer owns its file, and LevelDB only ever touches one file from one
 // thread, so the buffer needs no locking; the threshold is read once at
 // construction from the atomic global.
-class EmWritableFile: public WritableFile {
+class EmBufferedWritableFile final: public EmWritableFile {
 private:
   // In common MCBE saves, block_size is typically 163840. Therefore, the file
   // buffer is set to twice that value for better results.
   static constexpr size_t kFileWriteBuffer = 320 * 1024;
 
 public:
-  EmWritableFile(const std::string &path, i32 fd)
-    : m_path(path), m_fd(fd) { }
+  EmBufferedWritableFile(const std::string &path, i32 fd)
+    : EmWritableFile(path, fd) { }
 
-  EmWritableFile(const EmWritableFile&) = delete;
-  EmWritableFile& operator=(const EmWritableFile&) = delete;
+  EmBufferedWritableFile(const EmBufferedWritableFile &) = delete;
+  EmBufferedWritableFile &operator=(const EmBufferedWritableFile &) = delete;
 
-  virtual ~EmWritableFile() noexcept {
+  virtual ~EmBufferedWritableFile() noexcept {
     if (m_fd != -1) {
       // Best effort: a destructor cannot report a failure, but dropping the
       // buffer would silently lose acknowledged writes.
@@ -180,9 +262,7 @@ public:
     }
   }
 
-  bool IsValid() const { return m_fd != -1; }
-
-  virtual Status Append(const Slice& data) override {
+  virtual Status Append(const Slice &data) override {
     if (m_fd == -1) return Status::IOError(m_path, "file not open");
 
     m_buffer.append(data.data(), data.size());
@@ -265,8 +345,6 @@ private:
     return Status::OK();
   }
 
-  std::string m_path;
-  i32 m_fd;
   std::string m_buffer;
 };
 
