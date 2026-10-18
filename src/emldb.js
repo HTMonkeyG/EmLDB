@@ -8,16 +8,6 @@ function resolveModule(profile) {
     : require("../dist/libleveldb.js");
 }
 
-function normalizeInitializationOptions(options) {
-  if (options == null) options = {};
-  if (typeof options !== "object" || Array.isArray(options))
-    throw new TypeError("initialization options must be an object");
-  const memory = options.memory == null ? "performance" : options.memory;
-  if (memory !== "performance" && memory !== "scalable")
-    throw new RangeError('memory must be "performance" or "scalable"');
-  return memory;
-}
-
 // Check whether EmLDB is set.
 function GUARD_checkEmLDB() {
   if (!EmLDB)
@@ -76,6 +66,22 @@ function assertPath(path) {
     throw new TypeError("path must be a non-empty string");
   if (path.includes("\0"))
     throw new TypeError("path must not contain NUL characters");
+}
+
+function normalizeInitOptions(options) {
+  if (options == null) options = {};
+  if (typeof options !== "object" || Array.isArray(options))
+    throw new TypeError("initialization options must be an object");
+  const memory = options.memory == null ? "performance" : options.memory;
+  if (memory !== "performance" && memory !== "scalable")
+    throw new RangeError('memory must be "performance" or "scalable"');
+
+  var fileWriteBuffer = null;
+  if (options.fileWriteBuffer != null) {
+    assertInteger(fileWriteBuffer, "fileWriteBuffer", 0, 0x7FFFFFFF);
+    fileWriteBuffer = options.fileWriteBuffer;
+  }
+  return { memory, fileWriteBuffer };
 }
 
 function releaseDBState(state) {
@@ -537,7 +543,7 @@ class LevelDB {
   };
 
   static async initialize(options) {
-    const memory = normalizeInitializationOptions(options);
+    const { memory, fileWriteBuffer } = normalizeInitOptions(options);
     if (EmLDBMemoryProfile && EmLDBMemoryProfile !== memory)
       throw new Error(`LevelDB is already initialized with the ${EmLDBMemoryProfile} memory profile`);
 
@@ -545,6 +551,8 @@ class LevelDB {
       EmLDBMemoryProfile = memory;
       EmLDBPromise = resolveModule(memory)().then(function (module) {
         EmLDB = module;
+        if (fileWriteBuffer != null)
+          EmLDB.SetFileBufferSize(fileWriteBuffer);
         return true;
       }).catch(function (error) {
         EmLDBPromise = null;

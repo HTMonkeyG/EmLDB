@@ -21,10 +21,19 @@
 #include <emscripten/val.h>
 #include <leveldb/env.h>
 #include <leveldb/slice.h>
+#include "db/filename.h"
 #include "port/port.h"
 #include "util/mutexlock.h"
 #include "util/emldb_utils.h"
 #include "util/emldb_fs.h"
+
+// In common MCBE saves, block_size is typically 163840. Therefore, the file
+// buffer is set to twice that value for better results.
+static size_t g_fileWriteBuffer = 320 * 1024;
+
+void SetFileBufferSize(size_t size) {
+  g_fileWriteBuffer = size;
+}
 
 namespace leveldb {
 
@@ -232,30 +241,34 @@ protected:
 
 // Buffered writable file implementation.
 //
-// Appends land in an in-process buffer that is handed to Node in one
-// fs.writeSync per kDefaultFileWriteBuffer bytes rather than one per Append.
-// See the constants above for the cost and the durability tradeoff.
+// Written content is preferentially appended to the in-thread buffer. This
+// buffer is passed to Node.js at a rate of one I/O call per kFileWriteBuffer
+// bytes. For objects with immediate set to true, calling Flush() immediately
+// performs an I/O call and clears the buffer; otherwise, Flush() does nothing.
 //
-// Every writer owns its file, and LevelDB only ever touches one file from one
-// thread, so the buffer needs no locking; the threshold is read once at
-// construction from the atomic global.
+// Our code replaces the user-space buffer, but LevelDB attempts to call Flush()
+// after each SSTable block write completes. If Flush() were made to actually
+// write to disk in this case, the efficiency gain from the buffer would be
+// reduced.
+//
+// WARN: This comes at a cost: if the database is not properly closed for various
+//       reasons, the data in the buffer will be lost. If this is unacceptable,
+//       the user-space buffer must be disabled during LevelDB.initialize(), in
+//       which case it falls back to the immediate-write version (EmWritableFile).
 class EmBufferedWritableFile final: public EmWritableFile {
-private:
-  // In common MCBE saves, block_size is typically 163840. Therefore, the file
-  // buffer is set to twice that value for better results.
-  static constexpr size_t kFileWriteBuffer = 320 * 1024;
-
 public:
-  EmBufferedWritableFile(const std::string &path, i32 fd)
-    : EmWritableFile(path, fd) { }
+  EmBufferedWritableFile(const std::string &path, i32 fd, bool immediate = false)
+    : EmWritableFile(path, fd)
+    , m_immediate(immediate)
+  { m_buffer.reserve(g_fileWriteBuffer); }
 
   EmBufferedWritableFile(const EmBufferedWritableFile &) = delete;
   EmBufferedWritableFile &operator=(const EmBufferedWritableFile &) = delete;
 
   virtual ~EmBufferedWritableFile() noexcept {
     if (m_fd != -1) {
-      // Best effort: a destructor cannot report a failure, but dropping the
-      // buffer would silently lose acknowledged writes.
+      // WARN: A destructor cannot report a failure, but dropping the buffer
+      //       would silently lose acknowledged writes.
       m_FlushBuffer();
       char message[1] = {};
       emldb::fs::close(m_fd, message, sizeof(message));
@@ -267,7 +280,7 @@ public:
 
     m_buffer.append(data.data(), data.size());
 
-    if (m_buffer.size() >= kFileWriteBuffer)
+    if (m_buffer.size() >= g_fileWriteBuffer)
       return m_FlushBuffer();
 
     return Status::OK();
@@ -293,16 +306,16 @@ public:
   }
 
   virtual Status Flush() override {
-    // LevelDB calls this after every physical record, so flushing here would
-    // defeat the buffer entirely.
-    //return m_FlushBuffer();
-    return Status::OK();
+    // For immediate buffered writable file, we need to ensure that the file is
+    // written after every Flush() operation, in order to reduce potential data
+    // lost in .log files.
+    return m_immediate ? m_FlushBuffer() : Status::OK();
   }
 
   virtual Status Sync() override {
     if (m_fd == -1) return Status::IOError(m_path, "file not open");
 
-    Status s = m_FlushBuffer();
+    Status s = Flush();
     if (!s.ok()) return s;
 
     char message[256] = {};
@@ -345,7 +358,8 @@ private:
     return Status::OK();
   }
 
-  std::string m_buffer;
+  std::string m_buffer = "";
+  bool m_immediate = false;
 };
 
 // File lock backed by an atomically-created cross-process guard file.
@@ -482,9 +496,17 @@ public:
     i32 fdNum = -1
       , code = emldb::fs::open(fname.c_str(), "w", &fdNum, message, sizeof(message));
     if (code != emldb::kFsOk)
-      return FsError(fname, "open appendable file", code, message);
+      return FsError(fname, "open writable file", code, message);
 
-    *result = new EmWritableFile(fname, fdNum);
+    if (g_fileWriteBuffer) {
+      u64 number;
+      FileType filetype;
+      bool isLeveldbFile = ParseFileName(fname, &number, &filetype);
+      *result = new EmBufferedWritableFile(fname, fdNum, isLeveldbFile && filetype == kLogFile);
+    } else {
+      *result = new EmWritableFile(fname, fdNum);
+    }
+
     return Status::OK();
   }
 
@@ -498,7 +520,15 @@ public:
     if (code != emldb::kFsOk)
       return FsError(fname, "open appendable file", code, message);
 
-    *result = new EmWritableFile(fname, fdNum);
+    if (g_fileWriteBuffer) {
+      u64 number;
+      FileType filetype;
+      bool isLeveldbFile = ParseFileName(fname, &number, &filetype);
+      *result = new EmBufferedWritableFile(fname, fdNum, isLeveldbFile && filetype == kLogFile);
+    } else {
+      *result = new EmWritableFile(fname, fdNum);
+    }
+
     return Status::OK();
   }
 

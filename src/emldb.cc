@@ -417,8 +417,13 @@ private:
 // Emscripten Bindings
 // ----------------------------------------------------------------------------
 
+void SetFileBufferSize(size_t size);
+
 EMSCRIPTEN_BINDINGS(leveldb) {
   using namespace leveldb;
+
+  // Global setter.
+  function("SetFileBufferSize", &SetFileBufferSize);
 
   // Options classes
   class_<OptionsWrapper>("Options")

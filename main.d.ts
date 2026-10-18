@@ -132,8 +132,20 @@ export interface LevelDBOptions {
 }
 
 export interface LevelDBInitializationOptions {
-  /** Fixed 128MB heap for maximum pthread performance, or growable heap up to 2GB. */
-  memory?: 'performance' | 'scalable';
+  /**
+   * Fixed 128MB heap for maximum pthread performance, or growable heap up to 2GB.
+   * 
+   * Default: "performance"
+   */
+  memory?: "performance" | "scalable";
+
+  /**
+   * The maximum size of file data cached in memory when writing to disk, in bytes.
+   * Set to 0 to disable buffering.
+   * 
+   * Default: 320 * 1024
+   */
+  fileWriteBuffer?: number;
 }
 
 /**
