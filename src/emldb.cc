@@ -246,8 +246,8 @@ private:
 
 class LevelDBWrapper {
 public:
-  static void destroy(const std::string &path, OptionsWrapper &options) {
-    Status status = DestroyDB(path, options.get());
+  static void destroy(const std::string &path) {
+    Status status = DestroyDB(path, leveldb::Options());
     if (!status.ok()) {
       throw std::runtime_error(status.ToString());
     }
@@ -260,9 +260,9 @@ public:
     }
   }
 
-  static val infer(const std::string &path, OptionsWrapper &options) {
+  static val infer(const std::string &path) {
     std::string result;
-    Status status = InferDB(path, options.get(), &result);
+    Status status = InferDB(path, leveldb::Options(), &result);
     if (!status.ok()) {
       throw std::runtime_error(status.ToString());
     }
@@ -271,9 +271,9 @@ public:
       : val::undefined();
   }
 
-  static void encrypt(const std::string &path, OptionsWrapper &options, const val &key) {
+  static void encrypt(const std::string &path, const val &key) {
     std::string key_ = jsArrayToString(key);
-    Status status = EncryptDB(path, options.get(), key_);
+    Status status = EncryptDB(path, leveldb::Options(), key_);
     if (!status.ok()) {
       throw std::runtime_error(status.ToString());
     }

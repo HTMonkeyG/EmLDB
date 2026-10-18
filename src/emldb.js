@@ -1,4 +1,8 @@
 var EmLDB = null;
+var EmLDB_DefaultLevelDBOptions = null;
+var EmLDB_DefaultLevelDBWriteOptions = null;
+var EmLDB_DefaultLevelDBReadOptions = null;
+var EmLDB = null;
 var EmLDBPromise = null;
 var EmLDBMemoryProfile = null;
 
@@ -567,18 +571,15 @@ class LevelDB {
     return EmLDBMemoryProfile;
   }
 
-  static destroy(path, options) {
+  static destroy(path) {
     GUARD_checkEmLDB();
     assertPath(path);
 
-    var opt = new LevelDBOptions(options);
-
     const sp = EmLDB.stackSave();
     try {
-      EmLDB.DB.destroy(path, opt.get());
+      EmLDB.DB.destroy(path);
     } finally {
       EmLDB.stackRestore(sp);
-      opt.free();
     }
   }
 
@@ -597,35 +598,30 @@ class LevelDB {
     }
   }
 
-  static infer(path, options) {
+  static infer(path) {
     GUARD_checkEmLDB();
     assertPath(path);
 
-    var opt = new LevelDBOptions(options)
-      , result = void 0;
+    var result = void 0;
 
     const sp = EmLDB.stackSave();
     try {
-      result = EmLDB.DB.infer(path, opt.get());
+      result = EmLDB.DB.infer(path);
     } finally {
       EmLDB.stackRestore(sp);
-      opt.free();
       return result;
     }
   }
 
-  static encrypt(path, options) {
+  static encrypt(path, key) {
     GUARD_checkEmLDB();
     assertPath(path);
 
-    var opt = new LevelDBOptions(options);
-
     const sp = EmLDB.stackSave();
     try {
-      EmLDB.DB.encrypt(path, opt.get());
+      EmLDB.DB.encrypt(path, key);
     } finally {
       EmLDB.stackRestore(sp);
-      opt.free();
     }
   }
 

@@ -366,10 +366,9 @@ export class LevelDB {
    * Be very careful using this method.
    *
    * @param path - Path to the database
-   * @param options - Database options
    * @throws Error if destroy fails
    */
-  static destroy(path: string, options?: LevelDBOptions): void;
+  static destroy(path: string): void;
 
   /**
    * If a DB cannot be opened, you may attempt to call this method to
@@ -389,9 +388,8 @@ export class LevelDB {
    * Uint8Array, or undefined if the inference fails.
    *
    * @param path - Path to the database
-   * @param options - Database options
    */
-  static infer(path: string, options?: LevelDBOptions): Uint8Array | undefined;
+  static infer(path: string): Uint8Array | undefined;
 
   /**
    * This function performs decryption in place on the encrypted database,
@@ -399,10 +397,9 @@ export class LevelDB {
    * files, so call it with caution.
    *
    * @param path - Path to the database
-   * @param options - Database options
    * @param key - Encryption key
    */
-  static encrypt(path: string, options?: LevelDBOptions, key: Uint8Array): void;
+  static encrypt(path: string, key: Uint8Array): void;
 
   /**
    * Create a new LevelDB instance.
